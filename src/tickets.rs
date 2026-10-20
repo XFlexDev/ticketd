@@ -165,7 +165,7 @@ pub async fn setup(
         ai_enabled: ai.unwrap_or(true),
     };
     ctx.data().db.upsert_settings(&s).await?;
-    ctx.say(format!(
+    private(ctx, format!(
         "Setup saved: tickets → <#{}>, staff → owner + admins{}, logs → {}",
         s.ticket_category_id,
         staff_role.map(|r| format!(" + {}", r.mention())).unwrap_or_default(),
@@ -173,6 +173,27 @@ pub async fn setup(
     ))
     .await?;
     Ok(())
+}
+
+async fn private(ctx: Context<'_>, text: impl Into<String>) -> Result<(), Error> {
+    ctx.send(poise::CreateReply::default().content(text).ephemeral(true)).await?;
+    Ok(())
+}
+
+/// Ticket-channel commands: only the opener or staff may use them. Replies privately and returns false otherwise.
+async fn ticket_guard(ctx: Context<'_>) -> Result<bool, Error> {
+    let Some(guild) = ctx.guild_id() else { return Ok(false) };
+    let Some(t) = ctx.data().db.by_channel(ctx.channel_id().get()).await? else {
+        private(ctx, "This isn't a ticket channel.").await?;
+        return Ok(false);
+    };
+    let s = settings(ctx.data(), guild).await?;
+    let roles = ctx.author_member().await.map(|m| m.roles.clone()).unwrap_or_default();
+    if t.user_id as u64 != ctx.author().id.get() && !is_staff(&ctx.serenity_context().cache, guild, ctx.author().id, &roles, &s) {
+        private(ctx, "Only staff or the person who opened this ticket can do that.").await?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// /open — create a ticket.
@@ -186,7 +207,7 @@ pub async fn ticket_open(
     let s = match settings(ctx.data(), guild).await {
         Ok(s) => s,
         Err(e) => {
-            ctx.say(e.to_string()).await?;
+            private(ctx, e.to_string()).await?;
             return Ok(());
         }
     };
@@ -208,13 +229,13 @@ pub async fn ticket_panel(ctx: Context<'_>) -> Result<(), Error> {
     let s = match settings(ctx.data(), guild).await {
         Ok(s) => s,
         Err(e) => {
-            ctx.say(e.to_string()).await?;
+            private(ctx, e.to_string()).await?;
             return Ok(());
         }
     };
     let member = ctx.author_member().await.ok_or_else(|| anyhow::anyhow!("members only"))?;
     if !is_staff(&ctx.serenity_context().cache, guild, member.user.id, &member.roles, &s) {
-        ctx.say("Staff only.").await?;
+        private(ctx, "Staff only.").await?;
         return Ok(());
     }
     let button = serenity::CreateButton::new("ticket:open")
@@ -237,6 +258,10 @@ pub async fn ticket_panel(ctx: Context<'_>) -> Result<(), Error> {
 /// /close — close the ticket you're in (saves transcript + AI summary).
 #[poise::command(slash_command, guild_only, rename = "close")]
 pub async fn ticket_close(ctx: Context<'_>) -> Result<(), Error> {
+    if !ticket_guard(ctx).await? {
+        return Ok(());
+    }
+    private(ctx, "Closing ticket…").await?;
     close_current(ctx.serenity_context(), ctx.data(), ctx.channel_id(), ctx.author()).await?;
     Ok(())
 }
@@ -244,6 +269,9 @@ pub async fn ticket_close(ctx: Context<'_>) -> Result<(), Error> {
 /// /add — add a user to this ticket.
 #[poise::command(slash_command, guild_only, rename = "add")]
 pub async fn ticket_add(ctx: Context<'_>, #[description = "User to add"] user: serenity::User) -> Result<(), Error> {
+    if !ticket_guard(ctx).await? {
+        return Ok(());
+    }
     let channel = ctx.guild_channel().await.ok_or_else(|| anyhow::anyhow!("not a guild channel"))?;
     channel
         .id
@@ -263,6 +291,9 @@ pub async fn ticket_add(ctx: Context<'_>, #[description = "User to add"] user: s
 /// /remove — remove a user from this ticket.
 #[poise::command(slash_command, guild_only, rename = "remove")]
 pub async fn ticket_remove(ctx: Context<'_>, #[description = "User to remove"] user: serenity::User) -> Result<(), Error> {
+    if !ticket_guard(ctx).await? {
+        return Ok(());
+    }
     let channel = ctx.guild_channel().await.ok_or_else(|| anyhow::anyhow!("not a guild channel"))?;
     channel
         .id
@@ -284,7 +315,7 @@ pub async fn ticket_remove(ctx: Context<'_>, #[description = "User to remove"] u
 pub async fn ticket_transcript(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(t) = ctx.data().db.by_channel(ctx.channel_id().get()).await? else {
-        ctx.say("This isn't a ticket channel.").await?;
+        private(ctx, "This isn't a ticket channel.").await?;
         return Ok(());
     };
     let text = ctx.data().db.transcript(t.id).await?;
@@ -340,13 +371,12 @@ pub async fn handle_component(ctx: &serenity::Context, interaction: &serenity::I
     Ok(())
 }
 
-async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenity::ChannelId, by: &serenity::User) -> Result<()> {
+async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenity::ChannelId, by: &serenity::User) -> Result<bool> {
     let Some(t) = data.db.by_channel(channel_id.get()).await? else {
-        channel_id.say(&ctx.http, "This isn't a ticket channel.").await?;
-        return Ok(());
+        return Ok(false);
     };
     if t.status == "closed" {
-        return Ok(());
+        return Ok(true);
     }
     data.db.close_ticket(t.id).await?;
 
@@ -395,7 +425,7 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     channel_id.delete(&ctx.http).await.ok();
-    Ok(())
+    Ok(true)
 }
 
 /// Auto-reply with AI in ticket channels.

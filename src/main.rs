@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
             tickets::ticket_transcript(),
             tickets::setup(),
         ],
+        on_error: |err| Box::pin(on_error(err)),
         event_handler: |fctx, event| {
             Box::pin(async move {
                 let ctx = fctx.serenity_context;
@@ -125,4 +126,22 @@ async fn main() -> Result<()> {
 
     client.start().await?;
     Ok(())
+}
+
+async fn on_error(err: poise::FrameworkError<'_, Data, anyhow::Error>) {
+    match err {
+        poise::FrameworkError::Command { error, ctx, .. } => {
+            tracing::warn!("/{} failed: {error:#}", ctx.command().name);
+            let raw = error.to_string();
+            let text = if raw.contains("Invalid permissions") || raw.contains("Missing Permissions") || raw.contains("Missing Access") {
+                "I'm missing permissions for that. Give my role **Manage Channels**, **Manage Roles** and **Send Messages**, or re-invite me from kev.kreatix.dev.".to_string()
+            } else {
+                format!("Something went wrong: {raw}")
+            };
+            let _ = ctx.send(poise::CreateReply::default().content(text).ephemeral(true)).await;
+        }
+        other => {
+            let _ = poise::builtins::on_error(other).await;
+        }
+    }
 }

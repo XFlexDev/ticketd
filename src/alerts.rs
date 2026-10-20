@@ -84,7 +84,7 @@ async fn youtube_id(source: &str) -> Option<String> {
         return Some(id.clone());
     }
     let url = if s.starts_with("http") { s.to_string() } else { format!("https://www.youtube.com/{}", if s.starts_with('@') { s.to_string() } else { format!("@{s}") }) };
-    let html = HTTP.get(&url).header("accept-language", "en").send().await.ok()?.text().await.ok()?;
+    let html = HTTP.get(&url).header("accept-language", "en").header("cookie", "SOCS=CAI; CONSENT=YES+1").send().await.ok()?.text().await.ok()?;
     let canon = regex::Regex::new(r#"<link rel="canonical" href="https://www\.youtube\.com/channel/(UC[\w-]{22})""#).ok()?;
     let any = regex::Regex::new(r#""(?:externalId|channelId)":"(UC[\w-]{22})""#).ok()?;
     let id = canon.captures(&html).or_else(|| any.captures(&html)).map(|c| c[1].to_string())?;

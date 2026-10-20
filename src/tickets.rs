@@ -220,20 +220,17 @@ pub async fn ticket_panel(ctx: Context<'_>) -> Result<(), Error> {
     let button = serenity::CreateButton::new("ticket:open")
         .label("Open a ticket")
         .style(serenity::ButtonStyle::Primary);
-    ctx.channel_id()
-        .send_message(
-            ctx.serenity_context(),
-            serenity::CreateMessage::new()
-                .embed(
-                    serenity::CreateEmbed::new()
-                        .title("Support")
-                        .description("Need help? Open a ticket and we'll get to you.")
-                        .colour(0x5865F2),
-                )
-                .components(vec![serenity::CreateActionRow::Buttons(vec![button])]),
-        )
-        .await?;
-    ctx.say("Panel posted.").await?;
+    ctx.send(
+        poise::CreateReply::default()
+            .embed(
+                serenity::CreateEmbed::new()
+                    .title("Support")
+                    .description("Need help? Open a ticket and we'll get to you.")
+                    .colour(0x5865F2),
+            )
+            .components(vec![serenity::CreateActionRow::Buttons(vec![button])]),
+    )
+    .await?;
     Ok(())
 }
 

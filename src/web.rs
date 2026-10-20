@@ -1108,6 +1108,8 @@ fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
     Some(match name {
         "moderation" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::moderation::ModConfig>(c).ok()).unwrap_or_default()).ok()?,
         "automod" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::automod::AutomodConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "welcome" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::welcome::WelcomeConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "logging" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::logs::LogConfig>(c).ok()).unwrap_or_default()).ok()?,
         _ => return None,
     })
 }
@@ -1136,6 +1138,12 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         "automod" => serde_json::from_value::<crate::automod::AutomodConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "welcome" => serde_json::from_value::<crate::welcome::WelcomeConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "logging" => serde_json::from_value::<crate::logs::LogConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let cfg = match checked {
@@ -1147,6 +1155,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
     }
     if name == "automod" {
         crate::automod::forget(guild_id);
+    }
+    if name == "logging" {
+        crate::logs::forget(guild_id);
     }
     Json(json!({"config": cfg})).into_response()
 }

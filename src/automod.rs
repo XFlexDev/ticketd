@@ -569,21 +569,22 @@ async fn alert(ctx: &serenity::Context, data: &Data, guild: serenity::GuildId, c
     let _ = serenity::ChannelId::new(ch).send_message(&ctx.http, m).await;
 }
 
-pub async fn on_join(ctx: &serenity::Context, data: &Data, member: &serenity::Member) -> Result<()> {
+/// Returns true when the member was removed or held back, so no welcome is sent.
+pub async fn on_join(ctx: &serenity::Context, data: &Data, member: &serenity::Member) -> Result<bool> {
     if member.user.bot {
-        return Ok(());
+        return Ok(false);
     }
     let guild = member.guild_id;
     let cfg = config(data, guild.get()).await;
     if !cfg.enabled {
-        return Ok(());
+        return Ok(false);
     }
     let me: serenity::User = ctx.cache.current_user().clone().into();
 
     let locked = LOCKDOWN.lock().unwrap().get(&guild.get()).is_some_and(|(until, _)| *until > Instant::now());
     if locked && cfg.raid.kick_during {
         let _ = moderation::punish(ctx, data, guild, &member.user, &me, Act::Kick, "Anti-raid: joined during a lockdown").await;
-        return Ok(());
+        return Ok(true);
     }
 
     if cfg.raid.min_account_days > 0 {
@@ -596,12 +597,12 @@ pub async fn on_join(ctx: &serenity::Context, data: &Data, member: &serenity::Me
                 _ => Act::Kick,
             };
             let _ = moderation::punish(ctx, data, guild, &member.user, &me, act, &why).await;
-            return Ok(());
+            return Ok(true);
         }
     }
 
     if !cfg.raid.on || locked {
-        return Ok(());
+        return Ok(false);
     }
     let spike = {
         let mut j = JOINS.lock().unwrap();
@@ -620,7 +621,7 @@ pub async fn on_join(ctx: &serenity::Context, data: &Data, member: &serenity::Me
     if spike {
         start_lockdown(ctx, data, guild, &cfg).await;
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn start_lockdown(ctx: &serenity::Context, data: &Data, guild: serenity::GuildId, cfg: &AutomodConfig) {

@@ -4,11 +4,13 @@ mod ai;
 mod automod;
 mod db;
 mod gc;
+mod logs;
 mod moderation;
 mod panels;
 mod tickets;
 mod verify;
 mod web;
+mod welcome;
 
 use anyhow::Result;
 use poise::serenity_prelude as serenity;
@@ -75,11 +77,17 @@ async fn main() -> Result<()> {
         });
     }
 
-    let base = serenity::GatewayIntents::GUILDS | serenity::GatewayIntents::GUILD_MESSAGES | serenity::GatewayIntents::MESSAGE_CONTENT;
+    let base = serenity::GatewayIntents::GUILDS
+        | serenity::GatewayIntents::GUILD_MESSAGES
+        | serenity::GatewayIntents::MESSAGE_CONTENT
+        | serenity::GatewayIntents::GUILD_MODERATION
+        | serenity::GatewayIntents::GUILD_VOICE_STATES;
     // Server Members is privileged: if it isn't enabled in the dev portal, run without it.
     for intents in [base | serenity::GatewayIntents::GUILD_MEMBERS, base] {
         let framework = build_framework(db.clone(), cfg.clone(), ai.clone());
-        let mut client = serenity::ClientBuilder::new(&token, intents).framework(framework).await?;
+        let mut cache = serenity::cache::Settings::default();
+        cache.max_messages = 200;
+        let mut client = serenity::ClientBuilder::new(&token, intents).framework(framework).cache_settings(cache).await?;
         match client.start().await {
             Err(e) if intents.contains(serenity::GatewayIntents::GUILD_MEMBERS) && e.to_string().to_lowercase().contains("disallowed") => {
                 tracing::warn!("Server Members intent is off in the Discord dev portal: welcome, join logs and anti-raid are disabled");
@@ -132,8 +140,14 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                     }
                 }
                 if let serenity::FullEvent::GuildMemberAddition { new_member } = event {
-                    automod::on_join(ctx, data, new_member).await?;
+                    if !automod::on_join(ctx, data, new_member).await? {
+                        welcome::on_join(ctx, data, new_member).await?;
+                    }
                 }
+                if let serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } = event {
+                    welcome::on_leave(ctx, data, *guild_id, user).await?;
+                }
+                logs::on_event(ctx, data, event).await;
                 Ok(())
             })
         },

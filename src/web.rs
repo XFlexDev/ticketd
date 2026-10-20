@@ -4,10 +4,11 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde_json::{json, Value};
+use crate::agent::{AgentConfig, McpServer, TicketInfo};
 use tower_http::services::ServeDir;
 
 const MANAGE_GUILD: i64 = 0x20;
@@ -80,6 +81,9 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}", get(get_guild))
         .route("/api/guilds/{guild_id}/settings", put(put_settings))
         .route("/api/guilds/{guild_id}/tickets", get(list_tickets))
+        .route("/api/guilds/{guild_id}/agent", get(get_agent).put(put_agent))
+        .route("/api/guilds/{guild_id}/agent/test", post(test_agent))
+        .route("/api/guilds/{guild_id}/agent/mcp-test", post(test_mcp))
         .route("/api/tickets/{ticket_id}/transcript", get(transcript))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
         .with_state(web))
@@ -246,6 +250,86 @@ async fn put_settings(
     match w.data.db.upsert_settings(&s).await {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn get_agent(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    match w.data.db.agent_config(guild_id).await {
+        Ok(c) => Json(json!({"config": c.map(|c| AgentConfig::parse(&c)).unwrap_or_default()})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn put_agent(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(mut cfg): Json<AgentConfig>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    if let Err(e) = cfg.validate() {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    match w.data.db.save_agent_config(guild_id, &serde_json::to_string(&cfg).unwrap_or_default()).await {
+        Ok(_) => Json(json!({"ok": true, "config": cfg})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TestBody {
+    config: AgentConfig,
+    messages: Vec<TestMsg>,
+}
+#[derive(serde::Deserialize)]
+struct TestMsg {
+    role: String,
+    content: String,
+}
+
+/// Dashboard playground: runs the agent with unsaved config; escalate/close are only reported.
+async fn test_agent(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(mut body): Json<TestBody>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some((user_id, user_name, _)) = session else { return StatusCode::UNAUTHORIZED.into_response() };
+    if let Err(e) = body.config.validate() {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    let Some(last) = body.messages.pop().filter(|m| m.role == "user") else {
+        return (StatusCode::BAD_REQUEST, "last message must be from the user").into_response();
+    };
+    let history: Vec<(String, String)> = body
+        .messages
+        .into_iter()
+        .rev()
+        .take(20)
+        .rev()
+        .map(|m| (if m.role == "assistant" { "assistant" } else { "user" }.to_string(), m.content))
+        .collect();
+    let guild_name = match w.raw_session(&headers).await {
+        Some((_, _, j)) => parse_guilds(&j).into_iter().find(|g| gid(g) == Some(guild_id as i64)).and_then(|g| g["name"].as_str().map(str::to_string)),
+        None => None,
+    }
+    .unwrap_or_default();
+    let info = TicketInfo { guild_id, guild_name, channel_id: 0, user_id: user_id as u64, user_name, subject: "dashboard test".into() };
+    match crate::agent::run(&w.data.ai, &body.config, &info, &history, &last.content).await {
+        Ok(o) => Json(json!({"reply": o.text, "actions": o.actions, "tools": o.tools})).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("AI error: {e}")).into_response(),
+    }
+}
+
+async fn test_mcp(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(server): Json<McpServer>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    match crate::agent::list_mcp_tools(&server).await {
+        Ok(tools) => Json(json!({"tools": tools})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
     }
 }
 

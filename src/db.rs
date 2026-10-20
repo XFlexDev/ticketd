@@ -106,6 +106,11 @@ impl Kdb {
             &[],
         )
         .await?;
+        self.exec("CREATE TABLE IF NOT EXISTS agents (guild_id INTEGER PRIMARY KEY, config TEXT NOT NULL)", &[]).await?;
+        let cols = self.rows("PRAGMA table_info(tickets)", &[]).await.unwrap_or_default();
+        if !cols.iter().any(|c| c[1].as_str() == Some("escalated")) {
+            self.exec("ALTER TABLE tickets ADD COLUMN escalated INTEGER NOT NULL DEFAULT 0", &[]).await?;
+        }
         Ok(())
     }
 
@@ -242,12 +247,32 @@ impl Kdb {
     }
 
     /// (role, content) pairs for the AI; bot replies are `assistant`.
-    /// A human staff member (not the bot) has written in this ticket.
-    pub async fn staff_replied(&self, ticket_id: i64, bot_id: u64) -> Result<bool> {
+    pub async fn agent_config(&self, guild_id: u64) -> Result<Option<String>> {
+        let rows = self.rows("SELECT config FROM agents WHERE guild_id = ?", &[json!(guild_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_str().map(str::to_string)))
+    }
+    pub async fn save_agent_config(&self, guild_id: u64, config: &str) -> Result<()> {
+        self.exec(
+            "INSERT INTO agents (guild_id, config) VALUES (?,?) ON CONFLICT(guild_id) DO UPDATE SET config=excluded.config",
+            &[json!(guild_id), json!(config)],
+        )
+        .await?;
+        Ok(())
+    }
+    pub async fn set_escalated(&self, ticket_id: i64) -> Result<()> {
+        self.exec("UPDATE tickets SET escalated = 1 WHERE id = ?", &[json!(ticket_id)]).await?;
+        Ok(())
+    }
+    pub async fn is_escalated(&self, ticket_id: i64) -> Result<bool> {
+        let rows = self.rows("SELECT escalated FROM tickets WHERE id = ?", &[json!(ticket_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_i64()) == Some(1))
+    }
+    /// A human staff member (not the bot, not the ticket opener) has written in this ticket.
+    pub async fn staff_replied(&self, ticket_id: i64, bot_id: u64, opener_id: u64) -> Result<bool> {
         let rows = self
             .rows(
-                "SELECT 1 FROM messages WHERE ticket_id = ? AND is_staff = 1 AND author_id != ? LIMIT 1",
-                &[json!(ticket_id), json!(bot_id)],
+                "SELECT 1 FROM messages WHERE ticket_id = ? AND is_staff = 1 AND author_id != ? AND author_id != ? LIMIT 1",
+                &[json!(ticket_id), json!(bot_id), json!(opener_id)],
             )
             .await?;
         Ok(!rows.is_empty())

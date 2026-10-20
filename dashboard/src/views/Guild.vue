@@ -3,10 +3,11 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { mdiArrowLeft, mdiChevronRight } from '@mdi/js'
 import { api } from '../api'
+import Agent from './Agent.vue'
 
 const route = useRoute()
 const id = route.params.id
-const tab = ref(route.query.tab === 'settings' ? 'settings' : 'tickets')
+const tab = ref(['settings', 'agent'].includes(route.query.tab) ? route.query.tab : 'tickets')
 const guild = ref(null)
 const tickets = ref(null)
 const error = ref('')
@@ -55,6 +56,7 @@ async function save() {
     <template v-else>
       <v-tabs v-model="tab" color="primary" class="workspace-tabs">
         <v-tab value="tickets">Tickets</v-tab>
+        <v-tab value="agent">AI agent</v-tab>
         <v-tab value="settings">Settings</v-tab>
       </v-tabs>
       <v-window v-model="tab">
@@ -76,13 +78,16 @@ async function save() {
             </router-link>
           </template>
         </v-window-item>
+        <v-window-item value="agent">
+          <Agent :guild-id="id" @toast="t => (toast = { show: true, text: t })" />
+        </v-window-item>
         <v-window-item value="settings">
           <div class="settings-form">
             <v-select v-model="s.ticket_category_id" :items="categories" label="Ticket category" :loading="!guild" hint="New ticket channels go here" persistent-hint class="field-block" />
             <v-select v-model="s.mod_role_id" :items="roles" label="Extra staff role" clearable :loading="!guild" hint="Owner and admins always have access. Optional" persistent-hint class="field-block" />
             <v-select v-model="s.log_channel_id" :items="textChannels" label="Log channel" clearable :loading="!guild" hint="Summaries and transcripts are posted here. Optional" persistent-hint class="field-block" />
             <div class="switch-row">
-              <div><h3>AI replies</h3><p class="muted small">Answers members until staff joins</p></div>
+              <div><h3>AI replies</h3><p class="muted small">Answers members until staff joins. Set it up in AI agent</p></div>
               <v-switch v-model="s.ai_enabled" aria-label="AI replies" />
             </div>
             <div class="action-row">

@@ -39,7 +39,7 @@ impl Client {
         true
     }
 
-    /// Minimal chat call; returns assistant text.
+    /// Simple chat call; returns assistant text.
     pub async fn chat(&self, system: &str, history: &[(String, String)], user: &str) -> Result<String> {
         let mut messages = Vec::with_capacity(history.len() + 2);
         messages.push(serde_json::json!({"role": "system", "content": system}));
@@ -47,15 +47,24 @@ impl Client {
             messages.push(serde_json::json!({"role": role, "content": content}));
         }
         messages.push(serde_json::json!({"role": "user", "content": user}));
+        let m = self.complete(&messages, &[]).await?;
+        Ok(clean(m["content"].as_str().unwrap_or("")))
+    }
 
-        let body = serde_json::json!({
+    /// One completion round; returns the assistant message (content and/or tool_calls).
+    pub async fn complete(&self, messages: &[serde_json::Value], tools: &[serde_json::Value]) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "temperature": 0.4,
-            "max_tokens": 800,
+            "max_tokens": 2500,
         });
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
+            body["tool_choice"] = serde_json::json!("auto");
+        }
 
-        let mut last_err = anyhow::anyhow!("no keys");
+        let mut last_err = anyhow::anyhow!("all LLM keys are cooling down");
         for _ in 0..self.keys.len() {
             let Some((idx, key)) = self.next_key() else { break };
             let resp = self
@@ -63,24 +72,24 @@ impl Client {
                 .post(format!("{}/chat/completions", self.base_url))
                 .bearer_auth(key)
                 .json(&body)
-                .timeout(Duration::from_secs(45))
+                .timeout(Duration::from_secs(90))
                 .send()
                 .await;
             match resp {
                 Ok(r) if r.status().is_success() => {
                     let v: serde_json::Value = r.json().await?;
-                    let text = v["choices"][0]["message"]["content"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
-                    return Ok(text.trim().to_string());
+                    return Ok(v["choices"][0]["message"].clone());
                 }
                 Ok(r) => {
                     let status = r.status().as_u16();
                     if status == 429 || status >= 500 {
                         self.cool(idx);
                     }
-                    last_err = anyhow::anyhow!("LLM HTTP {status}");
+                    let text = r.text().await.unwrap_or_default();
+                    last_err = anyhow::anyhow!("LLM HTTP {status}: {}", text.chars().take(300).collect::<String>());
+                    if status == 400 {
+                        break;
+                    }
                 }
                 Err(e) => last_err = anyhow::anyhow!("LLM request failed: {e}"),
             }
@@ -108,4 +117,13 @@ impl Client {
     fn cool(&self, idx: usize) {
         self.cooldowns.lock().unwrap()[idx] = Some(Instant::now());
     }
+}
+
+/// Strips leaked <think> blocks and whitespace.
+pub fn clean(text: &str) -> String {
+    let t = match text.rfind("</think>") {
+        Some(i) => &text[i + "</think>".len()..],
+        None => text,
+    };
+    t.trim().to_string()
 }

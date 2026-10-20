@@ -163,6 +163,7 @@ impl Kdb {
         )
         .await?;
         self.exec("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at)", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS alert_seen (guild_id INTEGER NOT NULL, feed TEXT NOT NULL, seen TEXT NOT NULL, PRIMARY KEY (guild_id, feed))", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS panels (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, config TEXT NOT NULL)", &[]).await?;
         self.add_columns(
             "tickets",
@@ -769,6 +770,26 @@ impl Kdb {
 
     pub async fn deactivate_case(&self, guild_id: u64, num: i64) -> Result<()> {
         self.exec("UPDATE cases SET active = 0 WHERE guild_id = ? AND num = ?", &[json!(guild_id), json!(num)]).await?;
+        Ok(())
+    }
+
+    /// (guild_id, config) for every server that configured this module
+    pub async fn module_configs(&self, name: &str) -> Result<Vec<(u64, String)>> {
+        let rows = self.rows("SELECT guild_id, config FROM modules WHERE name = ?", &[json!(name)]).await?;
+        Ok(rows.iter().filter_map(|r| Some((r[0].as_i64()? as u64, r[1].as_str()?.to_string()))).collect())
+    }
+
+    pub async fn alert_seen(&self, guild_id: u64, feed: &str) -> Result<Option<Vec<String>>> {
+        let rows = self.rows("SELECT seen FROM alert_seen WHERE guild_id = ? AND feed = ?", &[json!(guild_id), json!(feed)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_str()).map(|s| serde_json::from_str(s).unwrap_or_default()))
+    }
+
+    pub async fn save_alert_seen(&self, guild_id: u64, feed: &str, seen: &[String]) -> Result<()> {
+        self.exec(
+            "INSERT INTO alert_seen (guild_id, feed, seen) VALUES (?,?,?) ON CONFLICT(guild_id, feed) DO UPDATE SET seen=excluded.seen",
+            &[json!(guild_id), json!(feed), json!(serde_json::to_string(seen)?)],
+        )
+        .await?;
         Ok(())
     }
 

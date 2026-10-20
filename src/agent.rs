@@ -743,7 +743,7 @@ fn is_public(ip: IpAddr) -> bool {
 }
 
 /// Client pinned to the URL's public IPs: no private targets, no redirects.
-async fn guarded_client(raw: &str) -> Result<(reqwest::Url, reqwest::Client)> {
+pub async fn guarded_client(raw: &str) -> Result<(reqwest::Url, reqwest::Client)> {
     let url = reqwest::Url::parse(raw.trim()).context("invalid URL")?;
     ensure!(matches!(url.scheme(), "https" | "http"), "URL must be http(s)");
     let host = url.host_str().context("URL has no host")?.trim_matches(['[', ']']).to_string();

@@ -247,6 +247,7 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/xp/reset", post(reset_xp))
         .route("/api/leaderboard/{guild_id}", get(public_leaderboard))
         .route("/api/guilds/{guild_id}/rolemenus/{menu_id}/send", post(send_role_menu))
+        .route("/api/guilds/{guild_id}/alerts/test", post(test_alert))
         .route("/share/{ticket_id}/{token}", get(share_page))
         .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
@@ -1129,6 +1130,7 @@ fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
         "logging" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::logs::LogConfig>(c).ok()).unwrap_or_default()).ok()?,
         "roles" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::roles::RolesConfig>(c).ok()).unwrap_or_default()).ok()?,
         "leveling" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::leveling::LevelConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "alerts" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::alerts::AlertsConfig>(c).ok()).unwrap_or_default()).ok()?,
         _ => return None,
     })
 }
@@ -1169,6 +1171,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         "leveling" => serde_json::from_value::<crate::leveling::LevelConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "alerts" => serde_json::from_value::<crate::alerts::AlertsConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let cfg = match checked {
@@ -1188,6 +1193,20 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         crate::leveling::forget(guild_id);
     }
     Json(json!({"config": cfg})).into_response()
+}
+
+async fn test_alert(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(body): Json<Value>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Ok(feed) = serde_json::from_value::<crate::alerts::Feed>(body) else {
+        return (StatusCode::BAD_REQUEST, "Bad alert").into_response();
+    };
+    match crate::alerts::test(&feed).await {
+        Ok((name, items)) => Json(json!({"name": name, "items": items})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
 }
 
 async fn send_role_menu(State(w): State<Web>, headers: HeaderMap, Path((guild_id, menu_id)): Path<(u64, String)>, Json(body): Json<Value>) -> Response {

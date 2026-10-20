@@ -14,10 +14,11 @@ import Welcome from './Welcome.vue'
 import Logging from './Logging.vue'
 import Roles from './Roles.vue'
 import Leveling from './Leveling.vue'
+import Alerts from './Alerts.vue'
 
 const route = useRoute()
 const id = route.params.id
-const tab = ref(['settings', 'agent', 'panels', 'verify', 'stats', 'moderation', 'automod', 'welcome', 'logging', 'roles', 'leveling'].includes(route.query.tab) ? route.query.tab : 'tickets')
+const tab = ref(['settings', 'agent', 'panels', 'verify', 'stats', 'moderation', 'automod', 'welcome', 'logging', 'roles', 'leveling', 'alerts'].includes(route.query.tab) ? route.query.tab : 'tickets')
 const filter = ref('open')
 const guild = ref(null)
 const tickets = ref(null)
@@ -110,6 +111,7 @@ async function save() {
         <v-tab value="logging">Logging</v-tab>
         <v-tab value="roles">Self roles</v-tab>
         <v-tab value="leveling">Leveling</v-tab>
+        <v-tab value="alerts">Alerts</v-tab>
         <v-tab value="verify">Verify</v-tab>
         <v-tab value="agent">AI agent</v-tab>
         <v-tab value="stats">Stats</v-tab>
@@ -165,6 +167,9 @@ async function save() {
         </v-window-item>
         <v-window-item value="leveling">
           <Leveling v-if="tab === 'leveling'" :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />
+        </v-window-item>
+        <v-window-item value="alerts">
+          <Alerts v-if="tab === 'alerts'" :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />
         </v-window-item>
         <v-window-item value="verify">
           <Verify v-if="tab === 'verify'" :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />

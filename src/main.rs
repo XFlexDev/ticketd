@@ -1,4 +1,5 @@
 mod agent;
+mod alerts;
 mod archive;
 mod ai;
 mod automod;
@@ -189,6 +190,7 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                 tokio::spawn(moderation::sweeper(ctx.clone(), data.clone()));
                 tokio::spawn(giveaways::sweeper(ctx.clone(), data.clone()));
                 tokio::spawn(utility::sweeper(ctx.clone(), data.clone()));
+                tokio::spawn(alerts::poller(ctx.clone(), data.clone()));
                 tokio::spawn(automod::scam_refresher());
                 if let Some(store) = data.store.clone() {
                     tokio::spawn(gc::sweeper(data.db.clone(), store));

@@ -40,9 +40,14 @@ impl Kdb {
             .json(&json!({"sql": sql, "params": params}))
             .timeout(std::time::Duration::from_secs(15))
             .send()
-            .await?
-            .error_for_status()?;
-        let v: Value = resp.json().await?;
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("database error {status}: {}", body.chars().take(300).collect::<String>());
+        }
+        let mut v: Value = resp.json().await?;
+        unwrap_big_ints(&mut v);
         Ok(v["results"][0].clone())
     }
 
@@ -275,4 +280,21 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+/// KreatixDB encodes integers beyond JS safe range as {"$integer": "123"}.
+fn unwrap_big_ints(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            if m.len() == 1 {
+                if let Some(n) = m.get("$integer").and_then(|s| s.as_str()).and_then(|s| s.parse::<i64>().ok()) {
+                    *v = Value::from(n);
+                    return;
+                }
+            }
+            m.values_mut().for_each(unwrap_big_ints);
+        }
+        Value::Array(a) => a.iter_mut().for_each(unwrap_big_ints),
+        _ => {}
+    }
 }

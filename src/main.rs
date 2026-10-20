@@ -2,6 +2,7 @@ mod agent;
 mod archive;
 mod ai;
 mod db;
+mod gc;
 mod panels;
 mod tickets;
 mod web;
@@ -104,6 +105,9 @@ async fn main() -> Result<()> {
                 }
                 let data = Data { db, cfg, ai, store };
                 tokio::spawn(tickets::sweeper(ctx.clone(), data.clone()));
+                if let Some(store) = data.store.clone() {
+                    tokio::spawn(gc::sweeper(data.db.clone(), store));
+                }
                 if let Some(tx) = WEB_TX.lock().unwrap().take() {
                     let _ = tx.send(std::sync::Arc::new(data.clone()));
                 }

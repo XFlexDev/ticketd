@@ -107,6 +107,46 @@ impl Web {
         }))
     }
 
+    /// Old backups can point at images/docs that were cleaned up since; blank those instead of restoring dead links.
+    async fn drop_missing(&self, guild_id: u64, store: &crate::archive::Store, mut v: Value) -> Value {
+        let docs: std::collections::BTreeSet<String> =
+            store.list(&format!("knowledge/{guild_id}/")).await.map(|l| l.into_iter().map(|(n, _)| n).collect()).unwrap_or_default();
+        if let Some(k) = v["agent"]["knowledge"].as_array_mut() {
+            k.retain(|d| d["key"].as_str().is_some_and(|key| docs.contains(key)));
+        }
+        let mut missing = std::collections::BTreeSet::new();
+        for r in crate::gc::refs(&v.to_string()) {
+            if let Some(h) = r.strip_prefix("m:") {
+                if matches!(self.data.db.file(h).await, Ok(None)) {
+                    missing.insert(h.to_string());
+                }
+            }
+        }
+        fn walk(v: &mut Value, missing: &std::collections::BTreeSet<String>) {
+            match v {
+                Value::String(s) if missing.iter().any(|h| s.contains(&format!("/media/{h}"))) => s.clear(),
+                Value::Array(a) => a.iter_mut().for_each(|x| walk(x, missing)),
+                Value::Object(o) => o.values_mut().for_each(|x| walk(x, missing)),
+                _ => {}
+            }
+        }
+        if !missing.is_empty() {
+            walk(&mut v, &missing);
+        }
+        v
+    }
+
+    async fn refs(&self, guild_id: u64) -> Option<std::collections::BTreeSet<String>> {
+        crate::gc::guild_refs(&self.data.db, guild_id).await.ok()
+    }
+
+    /// After a config change: deletes images/docs the guild dropped that nothing else uses.
+    fn release(&self, guild_id: u64, before: Option<std::collections::BTreeSet<String>>) {
+        let (Some(before), Some(store)) = (before, self.data.store.clone()) else { return };
+        let db = self.data.db.clone();
+        tokio::spawn(async move { crate::gc::release(&db, &store, guild_id, before).await });
+    }
+
     /// Saves the current config before a change. Keeps the last 50 per server.
     async fn backup(&self, guild_id: u64, what: &str) {
         let Some(store) = self.data.store.clone() else { return };
@@ -117,8 +157,10 @@ impl Web {
             let size = packed.len();
             store.put(&key, packed).await?;
             self.data.db.add_backup(guild_id, &key, what, size).await?;
-            for (id, _, _, _, _) in self.data.db.backups(guild_id).await?.into_iter().skip(50) {
-                self.data.db.delete_backup(id).await.ok();
+            for (id, key, _, _, _) in self.data.db.backups(guild_id).await?.into_iter().skip(50) {
+                if store.delete(&key).await.is_ok() {
+                    self.data.db.delete_backup(id).await.ok();
+                }
             }
             anyhow::Ok(())
         };
@@ -380,8 +422,12 @@ async fn put_agent(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Pat
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
     w.backup(guild_id, "AI agent").await;
+    let before = w.refs(guild_id).await;
     match w.data.db.save_agent_config(guild_id, &serde_json::to_string(&cfg).unwrap_or_default()).await {
-        Ok(_) => Json(json!({"ok": true, "config": cfg})).into_response(),
+        Ok(_) => {
+            w.release(guild_id, before);
+            Json(json!({"ok": true, "config": cfg})).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -592,15 +638,20 @@ async fn upload_media(State(w): State<Web>, headers: HeaderMap, Path(guild_id): 
     Json(json!({"url": format!("{}/media/{hash}.{out_ext}", w.base_url)})).into_response()
 }
 
+static MEDIA_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (String, axum::body::Bytes)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+pub fn forget_media(hash: &str) {
+    MEDIA_CACHE.lock().unwrap().remove(hash);
+}
+
 /// Public, immutable embed images (content-addressed), cached in memory and at Cloudflare.
 async fn media(State(w): State<Web>, Path(file): Path<String>) -> Response {
-    static CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (String, axum::body::Bytes)>>> =
-        std::sync::LazyLock::new(Default::default);
     let Some((hash, _)) = file.split_once('.') else { return StatusCode::NOT_FOUND.into_response() };
     if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let cached = CACHE.lock().unwrap().get(hash).cloned();
+    let cached = MEDIA_CACHE.lock().unwrap().get(hash).cloned();
     let (mime, bytes) = match cached {
         Some(v) => v,
         None => {
@@ -612,7 +663,7 @@ async fn media(State(w): State<Web>, Path(file): Path<String>) -> Response {
             }
             let Ok(b) = store.get(&key).await else { return StatusCode::BAD_GATEWAY.into_response() };
             let v = (mime, axum::body::Bytes::from(b));
-            let mut c = CACHE.lock().unwrap();
+            let mut c = MEDIA_CACHE.lock().unwrap();
             if c.values().map(|(_, b)| b.len()).sum::<usize>() > 64 * 1024 * 1024 {
                 c.clear();
             }
@@ -696,6 +747,8 @@ async fn restore_backup(State(w): State<Web>, headers: HeaderMap, Path((guild_id
         Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
     };
     w.backup(guild_id, "before restore").await;
+    let before = w.refs(guild_id).await;
+    let v = w.drop_missing(guild_id, &store, v).await;
     let run = async {
         if let Some(s) = v["settings"].as_object() {
             let id = |k: &str| s.get(k).and_then(|x| x.as_str()).and_then(|x| x.parse::<i64>().ok());
@@ -723,7 +776,10 @@ async fn restore_backup(State(w): State<Web>, headers: HeaderMap, Path((guild_id
         anyhow::Ok(())
     };
     match run.await {
-        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Ok(_) => {
+            w.release(guild_id, before);
+            Json(json!({"ok": true})).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -914,8 +970,10 @@ async fn upsert_panel(w: Web, headers: HeaderMap, guild_id: u64, mut p: Panel) -
         return (StatusCode::BAD_REQUEST, "Another panel already has that name").into_response();
     }
     w.backup(guild_id, "panels").await;
+    let before = w.refs(guild_id).await;
     match w.data.db.save_panel(guild_id, &p).await {
         Ok(id) => {
+            w.release(guild_id, before);
             p.id = id;
             Json(json!({"panel": p})).into_response()
         }
@@ -929,8 +987,12 @@ async fn delete_panel(State(w): State<Web>, headers: HeaderMap, Path((guild_id, 
         return s.into_response();
     }
     w.backup(guild_id, "panels").await;
+    let before = w.refs(guild_id).await;
     match w.data.db.delete_panel(guild_id, panel_id).await {
-        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Ok(_) => {
+            w.release(guild_id, before);
+            Json(json!({"ok": true})).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

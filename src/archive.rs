@@ -66,6 +66,44 @@ impl Store {
         Ok(())
     }
 
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        let r = self.http.delete(format!("{}?mode=all", self.object_url(key, "objects"))).bearer_auth(&self.token).send().await?;
+        let status = r.status();
+        ensure!(status.is_success() || status == reqwest::StatusCode::NOT_FOUND, "storage delete {status}");
+        Ok(())
+    }
+
+    /// Every file under `prefix` (recursive): (name, uploaded at in ms).
+    pub async fn list(&self, prefix: &str) -> Result<Vec<(String, i64)>> {
+        let mut out = vec![];
+        let mut todo = vec![prefix.to_string()];
+        while let Some(dir) = todo.pop() {
+            let mut cursor = String::new();
+            loop {
+                let v: Value = self
+                    .http
+                    .get(format!("{}/api/buckets/{}/objects?prefix={}&cursor={}&limit=1000", self.url, self.bucket, urlenc(&dir), urlenc(&cursor)))
+                    .bearer_auth(&self.token)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                for f in v["files"].as_array().into_iter().flatten() {
+                    if let Some(n) = f["name"].as_str() {
+                        out.push((n.to_string(), f["uploaded"].as_i64().unwrap_or(0)));
+                    }
+                }
+                todo.extend(v["folders"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).map(String::from));
+                match v["next"].as_str() {
+                    Some(n) if !n.is_empty() => cursor = n.to_string(),
+                    _ => break,
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Signed download link, 1-168 hours.
     pub async fn link(&self, key: &str, hours: u32) -> Result<String> {
         let v: Value = self
@@ -243,6 +281,10 @@ pub fn extract_text(bytes: &[u8], name: &str) -> Result<String> {
 
 static KCACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<String>>>> =
     std::sync::LazyLock::new(Default::default);
+
+pub fn forget_doc(key: &str) {
+    KCACHE.lock().unwrap().remove(key);
+}
 
 pub fn cache_doc(key: &str, text: String) {
     KCACHE.lock().unwrap().insert(key.to_string(), std::sync::Arc::new(text));

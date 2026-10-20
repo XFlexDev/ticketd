@@ -565,6 +565,44 @@ impl Kdb {
         Ok(())
     }
 
+    pub async fn delete_file(&self, hash: &str) -> Result<()> {
+        self.exec("DELETE FROM files WHERE hash = ?", &[json!(hash)]).await?;
+        Ok(())
+    }
+
+    /// Raw panel and agent config JSON of one guild.
+    pub async fn guild_configs(&self, guild_id: u64) -> Result<Vec<String>> {
+        let rows = self
+            .rows(
+                "SELECT config FROM panels WHERE guild_id = ? UNION ALL SELECT config FROM agents WHERE guild_id = ?",
+                &[json!(guild_id), json!(guild_id)],
+            )
+            .await?;
+        Ok(rows.iter().map(|r| r[0].as_str().unwrap_or("").to_string()).collect())
+    }
+
+    pub async fn all_configs(&self) -> Result<Vec<String>> {
+        let rows = self.rows("SELECT config FROM panels UNION ALL SELECT config FROM agents", &[]).await?;
+        Ok(rows.iter().map(|r| r[0].as_str().unwrap_or("").to_string()).collect())
+    }
+
+    /// Whether any guild's panel or agent config contains `needle`.
+    pub async fn configs_mention(&self, needle: &str) -> Result<bool> {
+        let like = format!("%{needle}%");
+        let rows = self
+            .rows(
+                "SELECT (SELECT COUNT(*) FROM panels WHERE config LIKE ?) + (SELECT COUNT(*) FROM agents WHERE config LIKE ?)",
+                &[json!(like), json!(like)],
+            )
+            .await?;
+        Ok(rows.first().and_then(|r| r[0].as_i64()).unwrap_or(1) > 0)
+    }
+
+    pub async fn all_backup_keys(&self) -> Result<Vec<String>> {
+        let rows = self.rows("SELECT key FROM backups", &[]).await?;
+        Ok(rows.iter().map(|r| r[0].as_str().unwrap_or("").to_string()).collect())
+    }
+
     pub async fn replace_in_message(&self, id: i64, from: &str, to: &str) -> Result<()> {
         self.exec("UPDATE messages SET content = REPLACE(content, ?, ?) WHERE id = ?", &[json!(from), json!(to), json!(id)]).await?;
         Ok(())
@@ -724,7 +762,7 @@ impl Kdb {
     }
 }
 
-fn now() -> i64 {
+pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

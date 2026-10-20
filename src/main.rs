@@ -4,6 +4,7 @@ mod ai;
 mod automod;
 mod db;
 mod gc;
+mod leveling;
 mod logs;
 mod moderation;
 mod panels;
@@ -126,6 +127,9 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
             moderation::slowmode(),
             moderation::lock(),
             moderation::unlock(),
+            leveling::rank(),
+            leveling::leaderboard(),
+            leveling::xp(),
         ],
         on_error: |err| Box::pin(on_error(err)),
         event_handler: |fctx, event| {
@@ -137,6 +141,7 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                 }
                 if let serenity::FullEvent::Message { new_message, .. } = event {
                     if !automod::on_message(ctx, new_message, data).await {
+                        leveling::on_message(ctx, new_message, data).await;
                         tickets::on_message(ctx, new_message, data).await?;
                     }
                 }

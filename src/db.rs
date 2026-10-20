@@ -145,6 +145,12 @@ impl Kdb {
         )
         .await?;
         self.exec("CREATE INDEX IF NOT EXISTS idx_cases_guild_user ON cases(guild_id, user_id)", &[]).await?;
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS xp (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, user_name TEXT NOT NULL DEFAULT '', avatar TEXT NOT NULL DEFAULT '', xp INTEGER NOT NULL DEFAULT 0, msgs INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id))",
+            &[],
+        )
+        .await?;
+        self.exec("CREATE INDEX IF NOT EXISTS idx_xp_rank ON xp(guild_id, xp)", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS panels (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, config TEXT NOT NULL)", &[]).await?;
         self.add_columns(
             "tickets",
@@ -751,6 +757,49 @@ impl Kdb {
 
     pub async fn deactivate_case(&self, guild_id: u64, num: i64) -> Result<()> {
         self.exec("UPDATE cases SET active = 0 WHERE guild_id = ? AND num = ?", &[json!(guild_id), json!(num)]).await?;
+        Ok(())
+    }
+
+    /// (xp, messages)
+    pub async fn xp(&self, guild_id: u64, user_id: u64) -> Result<(i64, i64)> {
+        let rows = self.rows("SELECT xp, msgs FROM xp WHERE guild_id = ? AND user_id = ?", &[json!(guild_id), json!(user_id)]).await?;
+        Ok(rows.first().map(|r| (r[0].as_i64().unwrap_or(0), r[1].as_i64().unwrap_or(0))).unwrap_or((0, 0)))
+    }
+
+    async fn bump_xp(&self, guild_id: u64, user_id: u64, name: &str, avatar: &str, gain: i64, msgs: i64) -> Result<()> {
+        self.exec(
+            "INSERT INTO xp (guild_id, user_id, user_name, avatar, xp, msgs) VALUES (?,?,?,?,?,?) ON CONFLICT(guild_id, user_id) DO UPDATE SET xp = MAX(0, xp + excluded.xp), msgs = msgs + excluded.msgs, user_name = excluded.user_name, avatar = excluded.avatar",
+            &[json!(guild_id), json!(user_id), json!(name), json!(avatar), json!(gain), json!(msgs)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn add_xp(&self, guild_id: u64, user_id: u64, name: &str, avatar: &str, gain: i64) -> Result<()> {
+        self.bump_xp(guild_id, user_id, name, avatar, gain, 1).await
+    }
+
+    pub async fn give_xp(&self, guild_id: u64, user_id: u64, name: &str, avatar: &str, amount: i64) -> Result<()> {
+        self.bump_xp(guild_id, user_id, name, avatar, amount, 0).await
+    }
+
+    pub async fn xp_place(&self, guild_id: u64, xp: i64) -> Result<i64> {
+        let rows = self.rows("SELECT COUNT(*) FROM xp WHERE guild_id = ? AND xp > ?", &[json!(guild_id), json!(xp)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_i64()).unwrap_or(0) + 1)
+    }
+
+    pub async fn leaderboard(&self, guild_id: u64, limit: i64, offset: i64) -> Result<Vec<Value>> {
+        let rows = self
+            .rows("SELECT user_id, user_name, avatar, xp, msgs FROM xp WHERE guild_id = ? AND xp > 0 ORDER BY xp DESC LIMIT ? OFFSET ?", &[json!(guild_id), json!(limit), json!(offset)])
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| json!({"user_id": r[0].as_i64().unwrap_or(0).to_string(), "name": r[1], "avatar": r[2], "xp": r[3], "msgs": r[4]}))
+            .collect())
+    }
+
+    pub async fn reset_xp(&self, guild_id: u64) -> Result<()> {
+        self.exec("DELETE FROM xp WHERE guild_id = ?", &[json!(guild_id)]).await?;
         Ok(())
     }
 

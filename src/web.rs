@@ -41,6 +41,20 @@ impl Web {
         Some((user_id, name, guilds))
     }
 
+    async fn discord_get(&self, path: &str) -> Value {
+        match self
+            .http
+            .get(format!("https://discord.com/api/v10/{path}"))
+            .header(header::AUTHORIZATION, format!("Bot {}", self.bot_token))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(r) => r.json().await.unwrap_or_default(),
+            Err(_) => Value::Null,
+        }
+    }
+
     async fn discord_list(&self, path: &str) -> Vec<Value> {
         match self
             .http
@@ -230,6 +244,8 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/verify/{token}", get(verify_page).post(verify_submit))
         .route("/api/guilds/{guild_id}/modules/{name}", get(get_module).put(put_module))
         .route("/api/guilds/{guild_id}/cases", get(list_cases))
+        .route("/api/guilds/{guild_id}/xp/reset", post(reset_xp))
+        .route("/api/leaderboard/{guild_id}", get(public_leaderboard))
         .route("/api/guilds/{guild_id}/rolemenus/{menu_id}/send", post(send_role_menu))
         .route("/share/{ticket_id}/{token}", get(share_page))
         .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
@@ -1112,6 +1128,7 @@ fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
         "welcome" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::welcome::WelcomeConfig>(c).ok()).unwrap_or_default()).ok()?,
         "logging" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::logs::LogConfig>(c).ok()).unwrap_or_default()).ok()?,
         "roles" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::roles::RolesConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "leveling" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::leveling::LevelConfig>(c).ok()).unwrap_or_default()).ok()?,
         _ => return None,
     })
 }
@@ -1149,6 +1166,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         "roles" => serde_json::from_value::<crate::roles::RolesConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "leveling" => serde_json::from_value::<crate::leveling::LevelConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let cfg = match checked {
@@ -1163,6 +1183,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
     }
     if name == "logging" {
         crate::logs::forget(guild_id);
+    }
+    if name == "leveling" {
+        crate::leveling::forget(guild_id);
     }
     Json(json!({"config": cfg})).into_response()
 }
@@ -1203,6 +1226,47 @@ async fn send_role_menu(State(w): State<Web>, headers: HeaderMap, Path((guild_id
             (StatusCode::BAD_REQUEST, msg).into_response()
         }
     }
+}
+
+async fn reset_xp(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    match w.data.db.reset_xp(guild_id).await {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct Page {
+    #[serde(default)]
+    page: i64,
+}
+
+/// Public: anyone with the link can see a server's leaderboard while leveling is on.
+async fn public_leaderboard(State(w): State<Web>, Path(guild_id): Path<u64>, axum::extract::Query(q): axum::extract::Query<Page>) -> Response {
+    if !crate::leveling::config(&w.data, guild_id).await.enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let page = q.page.clamp(0, 1000);
+    let rows = match w.data.db.leaderboard(guild_id, 50, page * 50).await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .map(|mut r| {
+            let (level, into) = crate::leveling::level_of(r["xp"].as_i64().unwrap_or(0));
+            r["level"] = json!(level);
+            r["into"] = json!(into);
+            r["need"] = json!(crate::leveling::need(level));
+            r
+        })
+        .collect();
+    let guild = w.discord_get(&format!("guilds/{guild_id}")).await;
+    Json(json!({"guild": {"name": guild["name"], "icon": guild["icon"]}, "rows": rows, "page": page})).into_response()
 }
 
 async fn list_cases(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {

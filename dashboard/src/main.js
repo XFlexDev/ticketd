@@ -18,6 +18,7 @@ const router = createRouter({
     { path: '/servers', redirect: '/' },
     { path: '/g/:id', component: Guild },
     { path: '/t/:id', component: Ticket },
+    { path: '/leaderboard/:id', component: () => import('./views/Leaderboard.vue') },
   ],
   scrollBehavior: () => ({ top: 0 }),
 })

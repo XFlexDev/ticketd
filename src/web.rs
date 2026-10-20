@@ -225,6 +225,9 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/backups", get(list_backups))
         .route("/api/guilds/{guild_id}/backups/{backup_id}/restore", post(restore_backup))
         .route("/api/guilds/{guild_id}/export", get(export_status).post(start_export))
+        .route("/api/guilds/{guild_id}/verify", get(get_verify).put(put_verify))
+        .route("/api/guilds/{guild_id}/verify/send", post(send_verify))
+        .route("/verify/{token}", get(verify_page).post(verify_submit))
         .route("/share/{ticket_id}/{token}", get(share_page))
         .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
@@ -1097,4 +1100,108 @@ fn parse_guilds(j: &str) -> Vec<Value> {
 
 fn gid(g: &Value) -> Option<i64> {
     g["id"].as_str()?.parse().ok()
+}
+
+async fn get_verify(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let cfg = w.data.db.verify_config(guild_id).await.ok().flatten().map(|c| crate::verify::VerifyConfig::parse(&c)).unwrap_or_default();
+    Json(json!({"config": cfg})).into_response()
+}
+
+async fn put_verify(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(mut cfg): Json<crate::verify::VerifyConfig>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    if let Err(e) = cfg.validate() {
+        return (StatusCode::BAD_REQUEST, e).into_response();
+    }
+    match w.data.db.save_verify_config(guild_id, &serde_json::to_string(&cfg).unwrap_or_default()).await {
+        Ok(_) => Json(json!({"config": cfg})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn send_verify(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(body): Json<Value>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some(channel) = body["channel_id"].as_str().and_then(|c| c.parse::<u64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, "Pick a channel").into_response();
+    };
+    let channels = w.discord_list(&format!("guilds/{guild_id}/channels")).await;
+    if !channels.iter().any(|c| c["id"].as_str() == Some(&channel.to_string()) && matches!(c["type"].as_i64(), Some(0 | 5))) {
+        return (StatusCode::BAD_REQUEST, "That channel isn't in this server").into_response();
+    }
+    let Some(cfg) = w.data.db.verify_config(guild_id).await.ok().flatten().map(|c| crate::verify::VerifyConfig::parse(&c)) else {
+        return (StatusCode::BAD_REQUEST, "Save the verification setup first").into_response();
+    };
+    let (embed, rows) = cfg.render();
+    let msg = poise::serenity_prelude::CreateMessage::new().embed(embed).components(rows);
+    match poise::serenity_prelude::ChannelId::new(channel).send_message(&*w.bot, msg).await {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("Couldn't post there: {e}")).into_response(),
+    }
+}
+
+fn verify_html(html: String) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'unsafe-inline' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::HeaderName::from_static("x-robots-tag"), "noindex"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        html,
+    )
+        .into_response()
+}
+
+async fn verify_page(Path(token): Path<String>) -> Response {
+    let sitekey = std::env::var("TURNSTILE_SITEKEY").unwrap_or_default();
+    let name = crate::verify::peek(&token).map(|(_, _, n)| n);
+    verify_html(crate::verify::page(name.as_deref(), &sitekey))
+}
+
+async fn verify_submit(State(w): State<Web>, headers: HeaderMap, Path(token): Path<String>, Json(body): Json<Value>) -> Response {
+    let fail = |m: &str| Json(json!({"ok": false, "error": m})).into_response();
+    let Some((guild, user, _)) = crate::verify::peek(&token) else { return fail("This link expired. Press Verify in Discord again.") };
+    let ip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let form = [
+        ("secret", std::env::var("TURNSTILE_SECRET").unwrap_or_default()),
+        ("response", body["token"].as_str().unwrap_or("").to_string()),
+        ("remoteip", ip),
+    ];
+    let passed = match w.http.post("https://challenges.cloudflare.com/turnstile/v0/siteverify").form(&form).send().await {
+        Ok(r) => r.json::<Value>().await.ok().is_some_and(|v| v["success"].as_bool() == Some(true)),
+        Err(_) => false,
+    };
+    if !passed {
+        return fail("The captcha didn't pass. Try again.");
+    }
+    let cfg = w.data.db.verify_config(guild).await.ok().flatten().map(|c| crate::verify::VerifyConfig::parse(&c)).unwrap_or_default();
+    let Ok(role) = cfg.role_id.parse::<u64>() else { return fail("Verification isn't set up on this server anymore.") };
+    use poise::serenity_prelude::{GuildId, RoleId, UserId};
+    let (g, u) = (GuildId::new(guild), UserId::new(user));
+    if let Err(e) = w.bot.add_member_role(g, u, RoleId::new(role), Some("Passed captcha")).await {
+        tracing::warn!("verify role {guild}/{user}: {e}");
+        return fail(if e.to_string().contains("Missing Permissions") {
+            "Kev isn't allowed to give that role. An admin needs to move Kev's role above it."
+        } else {
+            "Couldn't give you the role. Try again in a moment."
+        });
+    }
+    if let Ok(r) = cfg.remove_role_id.parse::<u64>() {
+        w.bot.remove_member_role(g, u, RoleId::new(r), Some("Passed captcha")).await.ok();
+    }
+    crate::verify::consume(&token);
+    Json(json!({"ok": true})).into_response()
 }

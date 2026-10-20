@@ -137,6 +137,7 @@ impl Kdb {
         )
         .await?;
         self.exec("CREATE TABLE IF NOT EXISTS agents (guild_id INTEGER PRIMARY KEY, config TEXT NOT NULL)", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS verify (guild_id INTEGER PRIMARY KEY, config TEXT NOT NULL)", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS panels (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, config TEXT NOT NULL)", &[]).await?;
         self.add_columns(
             "tickets",
@@ -692,6 +693,16 @@ impl Kdb {
     }
 
     /// (role, content) pairs for the AI; bot replies are `assistant`.
+    pub async fn verify_config(&self, guild_id: u64) -> Result<Option<String>> {
+        let rows = self.rows("SELECT config FROM verify WHERE guild_id = ?", &[json!(guild_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_str()).map(String::from))
+    }
+
+    pub async fn save_verify_config(&self, guild_id: u64, config: &str) -> Result<()> {
+        self.exec("INSERT OR REPLACE INTO verify (guild_id, config) VALUES (?,?)", &[json!(guild_id), json!(config)]).await?;
+        Ok(())
+    }
+
     pub async fn agent_config(&self, guild_id: u64) -> Result<Option<String>> {
         let rows = self.rows("SELECT config FROM agents WHERE guild_id = ?", &[json!(guild_id)]).await?;
         Ok(rows.first().and_then(|r| r[0].as_str().map(str::to_string)))

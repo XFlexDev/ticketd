@@ -5,6 +5,7 @@ mod db;
 mod gc;
 mod panels;
 mod tickets;
+mod verify;
 mod web;
 
 use anyhow::Result;

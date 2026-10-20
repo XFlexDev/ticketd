@@ -814,6 +814,9 @@ pub async fn handle_component(ctx: &serenity::Context, interaction: &serenity::I
     }
     let Some(component) = interaction.clone().message_component() else { return Ok(()) };
     let id = component.data.custom_id.clone();
+    if id == "verify:start" {
+        return crate::verify::on_click(ctx, data, &component).await;
+    }
     if id == "ticket:open" {
         defer_private(ctx, &component).await?;
         let text = match component.guild_id {

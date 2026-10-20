@@ -19,6 +19,8 @@ const router = createRouter({
     { path: '/g/:id', component: Guild },
     { path: '/t/:id', component: Ticket },
     { path: '/leaderboard/:id', component: () => import('./views/Leaderboard.vue') },
+    { path: '/terms', component: () => import('./views/Legal.vue') },
+    { path: '/privacy', component: () => import('./views/Legal.vue') },
   ],
   scrollBehavior: () => ({ top: 0 }),
 })

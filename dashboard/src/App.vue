@@ -45,6 +45,13 @@ onMounted(() => loadSession())
       <router-view v-slot="{ Component, route }">
         <transition name="pane" mode="out-in"><component :is="Component" :key="route.fullPath" /></transition>
       </router-view>
+      <footer class="site-foot muted small"><router-link to="/terms">Terms</router-link><router-link to="/privacy">Privacy</router-link></footer>
     </v-main>
   </v-app>
 </template>
+
+<style>
+.site-foot { display: flex; justify-content: center; gap: 20px; padding: 28px 0 36px }
+.site-foot a { color: inherit; text-decoration: none }
+.site-foot a:hover { text-decoration: underline }
+</style>

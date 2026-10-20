@@ -1,5 +1,4 @@
 <script setup>
-import AdSlot from '../components/AdSlot.vue'
 import { computed } from 'vue'
 import { mdiChevronRight } from '@mdi/js'
 import { session, inviteUrl, guildIcon } from '../api'
@@ -46,6 +45,5 @@ const guilds = computed(() => [...session.guilds].sort((a, b) => (a.name || '').
         </router-link>
       </div>
     </template>
-    <AdSlot />
   </div>
 </template>

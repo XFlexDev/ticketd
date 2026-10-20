@@ -4,7 +4,6 @@ import { useRoute } from 'vue-router'
 import { mdiArrowLeft, mdiChevronRight } from '@mdi/js'
 import { api } from '../api'
 import Agent from './Agent.vue'
-import AdSlot from '../components/AdSlot.vue'
 import Panels from './Panels.vue'
 import Stats from './Stats.vue'
 
@@ -101,7 +100,6 @@ async function save() {
         <v-tab value="stats">Stats</v-tab>
         <v-tab value="settings">Settings</v-tab>
       </v-tabs>
-      <AdSlot />
       <v-window v-model="tab">
         <v-window-item value="tickets">
           <div v-if="!tickets" class="row-list"><div v-for="i in 3" :key="i" class="skeleton-row"><span /></div></div>
@@ -184,7 +182,6 @@ async function save() {
         </v-window-item>
       </v-window>
     </template>
-    <AdSlot v-if="guild" />
     <v-snackbar v-model="toast.show" :timeout="2500">{{ toast.text }}</v-snackbar>
   </div>
 </template>

@@ -4,12 +4,14 @@ mod ai;
 mod automod;
 mod db;
 mod gc;
+mod giveaways;
 mod leveling;
 mod logs;
 mod moderation;
 mod panels;
 mod roles;
 mod tickets;
+mod utility;
 mod verify;
 mod web;
 mod welcome;
@@ -130,6 +132,10 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
             leveling::rank(),
             leveling::leaderboard(),
             leveling::xp(),
+            giveaways::giveaway(),
+            utility::poll(),
+            utility::remind(),
+            utility::reminders(),
         ],
         on_error: |err| Box::pin(on_error(err)),
         event_handler: |fctx, event| {
@@ -181,6 +187,8 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                 let data = Data { db, cfg, ai, store };
                 tokio::spawn(tickets::sweeper(ctx.clone(), data.clone()));
                 tokio::spawn(moderation::sweeper(ctx.clone(), data.clone()));
+                tokio::spawn(giveaways::sweeper(ctx.clone(), data.clone()));
+                tokio::spawn(utility::sweeper(ctx.clone(), data.clone()));
                 tokio::spawn(automod::scam_refresher());
                 if let Some(store) = data.store.clone() {
                     tokio::spawn(gc::sweeper(data.db.clone(), store));

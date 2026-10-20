@@ -151,6 +151,18 @@ impl Kdb {
         )
         .await?;
         self.exec("CREATE INDEX IF NOT EXISTS idx_xp_rank ON xp(guild_id, xp)", &[]).await?;
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS giveaways (message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, prize TEXT NOT NULL, winners INTEGER NOT NULL, ends_at INTEGER NOT NULL, host_id INTEGER NOT NULL, role_id INTEGER NOT NULL DEFAULT 0, ended INTEGER NOT NULL DEFAULT 0, won TEXT NOT NULL DEFAULT '')",
+            &[],
+        )
+        .await?;
+        self.exec("CREATE TABLE IF NOT EXISTS giveaway_entries (message_id INTEGER NOT NULL, user_id INTEGER NOT NULL, PRIMARY KEY (message_id, user_id))", &[]).await?;
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, text TEXT NOT NULL, due_at INTEGER NOT NULL)",
+            &[],
+        )
+        .await?;
+        self.exec("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at)", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS panels (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, config TEXT NOT NULL)", &[]).await?;
         self.add_columns(
             "tickets",
@@ -757,6 +769,85 @@ impl Kdb {
 
     pub async fn deactivate_case(&self, guild_id: u64, num: i64) -> Result<()> {
         self.exec("UPDATE cases SET active = 0 WHERE guild_id = ? AND num = ?", &[json!(guild_id), json!(num)]).await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_giveaway(&self, message_id: u64, guild_id: u64, channel_id: u64, prize: &str, winners: i64, ends_at: i64, host_id: u64, role_id: u64) -> Result<()> {
+        self.exec(
+            "INSERT INTO giveaways (message_id, guild_id, channel_id, prize, winners, ends_at, host_id, role_id) VALUES (?,?,?,?,?,?,?,?)",
+            &[json!(message_id), json!(guild_id), json!(channel_id), json!(prize), json!(winners), json!(ends_at), json!(host_id), json!(role_id)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    const GIVEAWAY_COLS: &'static str = "message_id, guild_id, channel_id, prize, winners, ends_at, host_id, role_id, ended, won";
+
+    fn giveaway_json(r: &Value) -> Value {
+        let u = |i: usize| json!(r[i].as_i64().unwrap_or(0) as u64);
+        json!({"message_id": u(0), "guild_id": u(1), "channel_id": u(2), "prize": r[3], "winners": r[4], "ends_at": r[5], "host_id": u(6), "role_id": u(7), "ended": r[8].as_i64() == Some(1), "winners_list": r[9], "winners_str": r[9]})
+    }
+
+    pub async fn giveaway(&self, message_id: u64) -> Result<Option<Value>> {
+        let rows = self.rows(&format!("SELECT {} FROM giveaways WHERE message_id = ?", Self::GIVEAWAY_COLS), &[json!(message_id)]).await?;
+        Ok(rows.first().map(Self::giveaway_json))
+    }
+
+    pub async fn due_giveaways(&self) -> Result<Vec<Value>> {
+        let rows = self.rows(&format!("SELECT {} FROM giveaways WHERE ended = 0 AND ends_at <= ?", Self::GIVEAWAY_COLS), &[json!(now())]).await?;
+        Ok(rows.iter().map(Self::giveaway_json).collect())
+    }
+
+    pub async fn end_giveaway(&self, message_id: u64, won: &str) -> Result<()> {
+        self.exec("UPDATE giveaways SET ended = 1, won = ? WHERE message_id = ?", &[json!(won), json!(message_id)]).await?;
+        Ok(())
+    }
+
+    /// true when the user is now entered
+    pub async fn toggle_entry(&self, message_id: u64, user_id: u64) -> Result<bool> {
+        let rows = self.rows("SELECT 1 FROM giveaway_entries WHERE message_id = ? AND user_id = ?", &[json!(message_id), json!(user_id)]).await?;
+        if rows.is_empty() {
+            self.exec("INSERT OR IGNORE INTO giveaway_entries (message_id, user_id) VALUES (?,?)", &[json!(message_id), json!(user_id)]).await?;
+            Ok(true)
+        } else {
+            self.exec("DELETE FROM giveaway_entries WHERE message_id = ? AND user_id = ?", &[json!(message_id), json!(user_id)]).await?;
+            Ok(false)
+        }
+    }
+
+    pub async fn entries(&self, message_id: u64) -> Result<Vec<u64>> {
+        let rows = self.rows("SELECT user_id FROM giveaway_entries WHERE message_id = ?", &[json!(message_id)]).await?;
+        Ok(rows.iter().filter_map(|r| r[0].as_i64()).map(|u| u as u64).collect())
+    }
+
+    pub async fn entry_count(&self, message_id: u64) -> Result<i64> {
+        let rows = self.rows("SELECT COUNT(*) FROM giveaway_entries WHERE message_id = ?", &[json!(message_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_i64()).unwrap_or(0))
+    }
+
+    pub async fn add_reminder(&self, user_id: u64, guild_id: u64, channel_id: u64, text: &str, due_at: i64) -> Result<()> {
+        self.exec("INSERT INTO reminders (user_id, guild_id, channel_id, text, due_at) VALUES (?,?,?,?,?)", &[json!(user_id), json!(guild_id), json!(channel_id), json!(text), json!(due_at)]).await?;
+        Ok(())
+    }
+
+    fn reminder_tuple(r: &Value) -> (i64, u64, u64, String, i64) {
+        (r[0].as_i64().unwrap_or(0), r[1].as_i64().unwrap_or(0) as u64, r[2].as_i64().unwrap_or(0) as u64, r[3].as_str().unwrap_or("").to_string(), r[4].as_i64().unwrap_or(0))
+    }
+
+    /// (id, user, channel, text, due_at)
+    pub async fn reminders(&self, user_id: u64) -> Result<Vec<(i64, u64, u64, String, i64)>> {
+        let rows = self.rows("SELECT id, user_id, channel_id, text, due_at FROM reminders WHERE user_id = ? ORDER BY due_at", &[json!(user_id)]).await?;
+        Ok(rows.iter().map(Self::reminder_tuple).collect())
+    }
+
+    pub async fn due_reminders(&self) -> Result<Vec<(i64, u64, u64, String, i64)>> {
+        let rows = self.rows("SELECT id, user_id, channel_id, text, due_at FROM reminders WHERE due_at <= ? LIMIT 100", &[json!(now())]).await?;
+        Ok(rows.iter().map(Self::reminder_tuple).collect())
+    }
+
+    pub async fn delete_reminder(&self, id: i64) -> Result<()> {
+        self.exec("DELETE FROM reminders WHERE id = ?", &[json!(id)]).await?;
         Ok(())
     }
 

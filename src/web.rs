@@ -93,6 +93,51 @@ impl Web {
         out
     }
 
+    /// Server config (settings, AI agent, panels) as JSON.
+    async fn snapshot(&self, guild_id: u64) -> Result<Value> {
+        let (s, a, p) = tokio::join!(self.data.db.settings(guild_id), self.data.db.agent_config(guild_id), self.data.db.panels(guild_id));
+        Ok(json!({
+            "settings": s?.map(|s| json!({
+                "ticket_category_id": s.ticket_category_id.to_string(), "mod_role_id": s.mod_role_id.to_string(),
+                "log_channel_id": s.log_channel_id.map(|v| v.to_string()), "ai_enabled": s.ai_enabled,
+                "autoclose_hours": s.autoclose_hours, "close_on_leave": s.close_on_leave, "ratings": s.ratings,
+            })),
+            "agent": a?.map(|c| AgentConfig::parse(&c)),
+            "panels": p?,
+        }))
+    }
+
+    /// Saves the current config before a change. Keeps the last 50 per server.
+    async fn backup(&self, guild_id: u64, what: &str) {
+        let Some(store) = self.data.store.clone() else { return };
+        let run = async {
+            let v = self.snapshot(guild_id).await?;
+            let packed = zstd::bulk::compress(&serde_json::to_vec(&v)?, 19)?;
+            let key = crate::archive::backup_key(guild_id, now_millis());
+            let size = packed.len();
+            store.put(&key, packed).await?;
+            self.data.db.add_backup(guild_id, &key, what, size).await?;
+            for (id, _, _, _, _) in self.data.db.backups(guild_id).await?.into_iter().skip(50) {
+                self.data.db.delete_backup(id).await.ok();
+            }
+            anyhow::Ok(())
+        };
+        if let Err(e) = run.await {
+            tracing::warn!("backup for {guild_id} failed: {e:#}");
+        }
+    }
+
+    async fn share_ok(&self, ticket_id: i64, token: &str) -> Option<(crate::db::Ticket, std::sync::Arc<crate::archive::Store>)> {
+        if token.len() < 20 {
+            return None;
+        }
+        let real = self.data.db.share_token(ticket_id).await.ok()?;
+        if real.is_empty() || real.len() != token.len() || real.bytes().zip(token.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) != 0 {
+            return None;
+        }
+        Some((self.data.db.by_id(ticket_id).await.ok()??, self.data.store.clone()?))
+    }
+
     fn require_guild(&self, session: &Option<(i64, String, Vec<i64>)>, guild_id: u64) -> Result<(), StatusCode> {
         let Some((_, _, guilds)) = session else { return Err(StatusCode::UNAUTHORIZED) };
         if guilds.contains(&(guild_id as i64)) {
@@ -134,6 +179,12 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/stats", get(stats))
         .route("/api/guilds/{guild_id}/media", post(upload_media).layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)))
         .route("/media/{file}", get(media))
+        .route("/api/guilds/{guild_id}/knowledge", post(upload_knowledge).layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)))
+        .route("/api/guilds/{guild_id}/backups", get(list_backups))
+        .route("/api/guilds/{guild_id}/backups/{backup_id}/restore", post(restore_backup))
+        .route("/api/guilds/{guild_id}/export", get(export_status).post(start_export))
+        .route("/share/{ticket_id}/{token}", get(share_page))
+        .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
         .with_state(web))
 }
@@ -302,6 +353,7 @@ async fn put_settings(
         close_on_leave: body["close_on_leave"].as_bool().unwrap_or(true),
         ratings: body["ratings"].as_bool().unwrap_or(true),
     };
+    w.backup(guild_id, "settings").await;
     match w.data.db.upsert_settings(&s).await {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -327,6 +379,7 @@ async fn put_agent(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Pat
     if let Err(e) = cfg.validate() {
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
+    w.backup(guild_id, "AI agent").await;
     match w.data.db.save_agent_config(guild_id, &serde_json::to_string(&cfg).unwrap_or_default()).await {
         Ok(_) => Json(json!({"ok": true, "config": cfg})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -379,7 +432,8 @@ async fn test_agent(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Pa
         opened_at: now_secs(),
         ..Default::default()
     };
-    match crate::agent::run(&w.data.ai, &body.config, &info, &history, &last.content).await {
+    let knowledge = crate::archive::load_knowledge(w.data.store.as_deref(), &body.config.knowledge).await;
+    match crate::agent::run(&w.data.ai, &body.config, &info, &knowledge, &history, &last.content).await {
         Ok(o) => Json(json!({"reply": o.text, "actions": o.actions, "tools": o.tools})).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, format!("AI error: {e}")).into_response(),
     }
@@ -454,7 +508,8 @@ async fn ticket_detail(State(w): State<Web>, headers: HeaderMap, Path(ticket_id)
             let ids: Vec<String> = [t.user_id, t.claimed_by, t.closed_by].iter().filter(|x| **x != 0).map(|x| x.to_string()).collect();
             v["users"] = json!(w.user_names(&ids).await);
             v["transcript"] = json!(w.data.db.transcript(ticket_id).await.unwrap_or_default());
-            v["archived"] = json!(w.data.store.is_some());
+            let token = w.data.db.share_token(ticket_id).await.unwrap_or_default();
+            v["share_url"] = json!((!token.is_empty()).then(|| format!("{}/share/{ticket_id}/{token}", w.base_url)));
             Json(v).into_response()
         }
         Ok(Some(_)) => StatusCode::FORBIDDEN.into_response(),
@@ -477,26 +532,8 @@ async fn ticket_file(State(w): State<Web>, headers: HeaderMap, Path((ticket_id, 
     if !w.data.db.ticket_has_file(ticket_id, &hash).await.unwrap_or(false) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let (Some(store), Ok(Some((key, enc, mime)))) = (w.data.store.clone(), w.data.db.file(&hash).await) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let enc = crate::archive::Enc::parse(&enc);
-    let bytes = match store.get(&key).await.and_then(|b| crate::archive::decompress(b, enc)) {
-        Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
-    };
-    let ctype = if enc == crate::archive::Enc::Webp { "image/webp".to_string() } else { mime };
-    let safe = ctype.starts_with("image/") || ctype.starts_with("video/") || ctype.starts_with("audio/") || ctype == "application/pdf";
-    let ctype = if safe || ctype.starts_with("text/plain") { ctype } else if ctype.starts_with("text/") { "text/plain; charset=utf-8".into() } else { "application/octet-stream".into() };
-    (
-        [
-            (header::CONTENT_TYPE, ctype),
-            (header::CACHE_CONTROL, "private, max-age=86400".into()),
-            (header::HeaderName::from_static("x-content-type-options"), "nosniff".into()),
-        ],
-        bytes,
-    )
-        .into_response()
+    let Some(store) = w.data.store.clone() else { return StatusCode::NOT_FOUND.into_response() };
+    serve_archived(&store, &w, &hash).await
 }
 
 /// Dashboard image upload for embeds. PNG/BMP/TIFF become lossless WebP; JPEG/GIF/WebP stay as they are.
@@ -594,6 +631,249 @@ async fn media(State(w): State<Web>, Path(file): Path<String>) -> Response {
         .into_response()
 }
 
+async fn upload_knowledge(
+    State(w): State<Web>,
+    headers: HeaderMap,
+    Path(guild_id): Path<u64>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some(store) = w.data.store.clone() else { return (StatusCode::SERVICE_UNAVAILABLE, "Uploads are off right now").into_response() };
+    let name: String = q.get("name").map(|n| n.trim().chars().take(100).collect()).unwrap_or_default();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing file name").into_response();
+    }
+    if body.len() > crate::archive::MAX_DOC {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Documents can be up to 5 MB").into_response();
+    }
+    let (bytes, n) = (body.to_vec(), name.clone());
+    let text = match tokio::task::spawn_blocking(move || crate::archive::extract_text(&bytes, &n)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let hash = crate::archive::sha256(text.as_bytes());
+    let key = format!("knowledge/{guild_id}/{hash}.txt.zst");
+    let packed = match zstd::bulk::compress(text.as_bytes(), 19) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    if let Err(e) = store.put(&key, packed).await {
+        return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+    }
+    let chars = text.chars().count() as i64;
+    crate::archive::cache_doc(&key, text);
+    Json(json!({"doc": {"name": name, "key": key, "chars": chars}})).into_response()
+}
+
+async fn list_backups(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    match w.data.db.backups(guild_id).await {
+        Ok(b) => Json(json!({"backups": b.iter().map(|(id, _, what, size, at)| json!({"id": id, "what": what, "size": size, "at": at})).collect::<Vec<_>>()}))
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn restore_backup(State(w): State<Web>, headers: HeaderMap, Path((guild_id, backup_id)): Path<(u64, i64)>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some(store) = w.data.store.clone() else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    let Some((_, key, _, _, _)) = w.data.db.backups(guild_id).await.unwrap_or_default().into_iter().find(|b| b.0 == backup_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let v: Value = match store.get(&key).await.and_then(|b| crate::archive::decompress(b, crate::archive::Enc::Zstd)).and_then(|b| Ok(serde_json::from_slice(&b)?)) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    };
+    w.backup(guild_id, "before restore").await;
+    let run = async {
+        if let Some(s) = v["settings"].as_object() {
+            let id = |k: &str| s.get(k).and_then(|x| x.as_str()).and_then(|x| x.parse::<i64>().ok());
+            w.data
+                .db
+                .upsert_settings(&crate::db::Settings {
+                    guild_id: guild_id as i64,
+                    ticket_category_id: id("ticket_category_id").unwrap_or(0),
+                    mod_role_id: id("mod_role_id").unwrap_or(0),
+                    log_channel_id: id("log_channel_id"),
+                    ai_enabled: s.get("ai_enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+                    autoclose_hours: s.get("autoclose_hours").and_then(|x| x.as_i64()).unwrap_or(0),
+                    close_on_leave: s.get("close_on_leave").and_then(|x| x.as_bool()).unwrap_or(true),
+                    ratings: s.get("ratings").and_then(|x| x.as_bool()).unwrap_or(true),
+                })
+                .await?;
+        }
+        if v["agent"].is_object() {
+            let mut cfg: AgentConfig = serde_json::from_value(v["agent"].clone()).unwrap_or_default();
+            cfg.validate().map_err(|e| anyhow::anyhow!(e))?;
+            w.data.db.save_agent_config(guild_id, &serde_json::to_string(&cfg)?).await?;
+        }
+        let panels: Vec<Panel> = serde_json::from_value(v["panels"].clone()).unwrap_or_default();
+        w.data.db.restore_panels(guild_id, &panels).await?;
+        anyhow::Ok(())
+    };
+    match run.await {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// guild -> (state, url, at)
+static EXPORTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<u64, (String, String, i64)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+async fn export_status(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let e = EXPORTS.lock().unwrap().get(&guild_id).cloned();
+    Json(match e {
+        Some((state, url, at)) => json!({"state": state, "url": url, "at": at}),
+        None => json!({"state": "none"}),
+    })
+    .into_response()
+}
+
+async fn start_export(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some(store) = w.data.store.clone() else { return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    {
+        let mut ex = EXPORTS.lock().unwrap();
+        if ex.get(&guild_id).is_some_and(|e| e.0 == "working") {
+            return Json(json!({"state": "working"})).into_response();
+        }
+        ex.insert(guild_id, ("working".into(), String::new(), now_secs()));
+    }
+    tokio::spawn(async move {
+        let result = build_export(&w, &store, guild_id).await;
+        let entry = match result {
+            Ok(url) => ("done".to_string(), url, now_secs()),
+            Err(e) => {
+                tracing::warn!("export {guild_id} failed: {e:#}");
+                (format!("failed: {e}"), String::new(), now_secs())
+            }
+        };
+        EXPORTS.lock().unwrap().insert(guild_id, entry);
+    });
+    Json(json!({"state": "working"})).into_response()
+}
+
+/// Zip with config, every ticket + messages, and archived files (original form), uploaded to storage; returns a 7-day link.
+async fn build_export(w: &Web, store: &crate::archive::Store, guild_id: u64) -> Result<String> {
+    use std::io::Write;
+    let tickets = w.data.db.all_tickets(guild_id).await?;
+    let mut docs = vec![];
+    let mut hashes = std::collections::BTreeSet::new();
+    for t in &tickets {
+        let msgs = w.data.db.messages_json(t.id).await?;
+        for m in &msgs {
+            let c = m["content"].as_str().unwrap_or("");
+            for part in c.split("kst:").skip(1) {
+                let h: String = part.chars().take(64).collect();
+                if h.len() == 64 {
+                    hashes.insert(h);
+                }
+            }
+        }
+        docs.push(crate::archive::ticket_doc(t, msgs));
+    }
+    let config = w.snapshot(guild_id).await?;
+    let mut files: Vec<(String, Vec<u8>)> = vec![];
+    let mut total = 0usize;
+    for h in hashes {
+        let Some((key, enc, mime)) = w.data.db.file(&h).await? else { continue };
+        let Ok(b) = store.get(&key).await.and_then(|b| crate::archive::decompress(b, crate::archive::Enc::parse(&enc))) else { continue };
+        total += b.len();
+        if total > 400 * 1024 * 1024 {
+            break;
+        }
+        let ext = if enc == "webp" { "webp".to_string() } else { mime.rsplit('/').next().unwrap_or("bin").replace("jpeg", "jpg").replace("plain", "txt") };
+        files.push((format!("files/{h}.{ext}"), b));
+    }
+    let zip_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let deflate = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).compression_level(Some(9));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("config.json", deflate)?;
+        zw.write_all(&serde_json::to_vec_pretty(&config)?)?;
+        zw.start_file("tickets.json", deflate)?;
+        zw.write_all(&serde_json::to_vec_pretty(&docs)?)?;
+        for (name, b) in files {
+            let opt = if [".webp", ".jpg", ".png", ".gif", ".mp4", ".zip"].iter().any(|e| name.ends_with(e)) { stored } else { deflate };
+            zw.start_file(name, opt)?;
+            zw.write_all(&b)?;
+        }
+        Ok(zw.finish()?.into_inner())
+    })
+    .await??;
+    let key = format!("exports/{guild_id}/{}.zip", now_secs());
+    store.put(&key, zip_bytes).await?;
+    store.link(&key, 168).await
+}
+
+/// Public, unguessable transcript page linked from the log channel.
+async fn share_page(State(w): State<Web>, Path((ticket_id, token)): Path<(i64, String)>) -> Response {
+    let Some((t, store)) = w.share_ok(ticket_id, &token).await else { return StatusCode::NOT_FOUND.into_response() };
+    match store.get(&crate::archive::transcript_key(t.guild_id, t.id)).await.and_then(|b| crate::archive::decompress(b, crate::archive::Enc::Zstd)) {
+        Ok(html) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CONTENT_SECURITY_POLICY, "default-src 'none'; img-src 'self' https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"),
+                (header::CACHE_CONTROL, "private, max-age=3600"),
+                (header::HeaderName::from_static("x-robots-tag"), "noindex"),
+                (header::REFERRER_POLICY, "no-referrer"),
+            ],
+            html,
+        )
+            .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn share_file(State(w): State<Web>, Path((ticket_id, token, hash)): Path<(i64, String, String)>) -> Response {
+    let Some((_, store)) = w.share_ok(ticket_id, &token).await else { return StatusCode::NOT_FOUND.into_response() };
+    if hash.len() != 64 || !w.data.db.ticket_has_file(ticket_id, &hash).await.unwrap_or(false) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    serve_archived(&store, &w, &hash).await
+}
+
+async fn serve_archived(store: &crate::archive::Store, w: &Web, hash: &str) -> Response {
+    let Ok(Some((key, enc, mime))) = w.data.db.file(hash).await else { return StatusCode::NOT_FOUND.into_response() };
+    let enc = crate::archive::Enc::parse(&enc);
+    let bytes = match store.get(&key).await.and_then(|b| crate::archive::decompress(b, enc)) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    };
+    let ctype = if enc == crate::archive::Enc::Webp { "image/webp".to_string() } else { mime };
+    let safe = ctype.starts_with("image/") && ctype != "image/svg+xml" || ctype.starts_with("video/") || ctype.starts_with("audio/") || ctype == "application/pdf";
+    let ctype = if safe { ctype } else if ctype.starts_with("text/") { "text/plain; charset=utf-8".into() } else { "application/octet-stream".into() };
+    (
+        [
+            (header::CONTENT_TYPE, ctype),
+            (header::CACHE_CONTROL, "private, max-age=86400".into()),
+            (header::HeaderName::from_static("x-content-type-options"), "nosniff".into()),
+            (header::CONTENT_SECURITY_POLICY, "default-src 'none'; sandbox".into()),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 async fn list_panels(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
     let session = w.session(&headers).await;
     if let Err(s) = w.require_guild(&session, guild_id) {
@@ -633,6 +913,7 @@ async fn upsert_panel(w: Web, headers: HeaderMap, guild_id: u64, mut p: Panel) -
     if existing.iter().any(|x| x.id != p.id && x.name.eq_ignore_ascii_case(&p.name)) {
         return (StatusCode::BAD_REQUEST, "Another panel already has that name").into_response();
     }
+    w.backup(guild_id, "panels").await;
     match w.data.db.save_panel(guild_id, &p).await {
         Ok(id) => {
             p.id = id;
@@ -647,6 +928,7 @@ async fn delete_panel(State(w): State<Web>, headers: HeaderMap, Path((guild_id, 
     if let Err(s) = w.require_guild(&session, guild_id) {
         return s.into_response();
     }
+    w.backup(guild_id, "panels").await;
     match w.data.db.delete_panel(guild_id, panel_id).await {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -729,6 +1011,10 @@ async fn spa_index() -> impl IntoResponse {
 
 fn urlencoding(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() || "-_.~".contains(c) { c.to_string() } else { format!("%{:02X}", c as u32) }).collect()
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
 }
 
 fn now_secs() -> i64 {

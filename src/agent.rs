@@ -100,7 +100,23 @@ pub struct AgentConfig {
     /// Look of the first message in a new ticket.
     #[serde(default)]
     pub welcome: Welcome,
+    /// Uploaded documents the AI can search (text stored on Kreatix Storage).
+    #[serde(default)]
+    pub knowledge: Vec<Doc>,
 }
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Doc {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub chars: i64,
+}
+
+/// Loaded knowledge text: (file name, text).
+pub type Knowledge = Vec<(String, Arc<String>)>;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Welcome {
@@ -151,6 +167,7 @@ impl Default for AgentConfig {
             reply_delay: 0,
             max_steps: d_steps(),
             welcome: Welcome::default(),
+            knowledge: vec![],
         }
     }
 }
@@ -179,6 +196,8 @@ impl AgentConfig {
         self.greeting = self.greeting.trim().chars().take(1500).collect();
         self.reply_delay = self.reply_delay.clamp(0, 30);
         self.max_steps = self.max_steps.clamp(1, 10);
+        self.knowledge.retain(|d| d.key.starts_with("knowledge/") && !d.name.trim().is_empty());
+        self.knowledge.truncate(30);
         let w = &mut self.welcome;
         w.title = w.title.trim().chars().take(256).collect();
         w.footer = w.footer.trim().chars().take(2048).collect();
@@ -305,7 +324,7 @@ pub fn system_prompt(cfg: &AgentConfig, t: &TicketInfo) -> String {
     p.push_str(&format!(
         "\n## Rules\n\
          - {tone} {lang} Use Discord markdown. Stay under {} characters.\n\
-         - Built-in tools: get_ticket_info, get_past_tickets, get_server_info, read_web_page, get_time, set_priority, rename_ticket, add_staff_note. \
+         - Built-in tools: search_knowledge (when documents exist), get_ticket_info, get_past_tickets, get_server_info, read_web_page, get_time, set_priority, rename_ticket, add_staff_note. \
          Set priority when the issue is clearly urgent or minor, rename the ticket once the topic is clear, and leave a staff note with key facts before escalating.\n",
         cfg.max_reply
     ));
@@ -339,6 +358,7 @@ enum Builtin {
 }
 
 enum Route {
+    Knowledge,
     Builtin(Builtin),
     Escalate,
     Close,
@@ -351,7 +371,14 @@ fn func(name: &str, description: &str, parameters: Value) -> Value {
     json!({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}})
 }
 
-pub async fn run(ai: &ai::Client, cfg: &AgentConfig, t: &TicketInfo, history: &[(String, String)], user_msg: &str) -> Result<Outcome> {
+pub async fn run(
+    ai: &ai::Client,
+    cfg: &AgentConfig,
+    t: &TicketInfo,
+    knowledge: &Knowledge,
+    history: &[(String, String)],
+    user_msg: &str,
+) -> Result<Outcome> {
     let mut tools = vec![func(
         "escalate_to_staff",
         "Ping human staff into this ticket and stop answering. Only after the user agreed to get staff.",
@@ -392,6 +419,15 @@ pub async fn run(ai: &ai::Client, cfg: &AgentConfig, t: &TicketInfo, history: &[
     for (name, desc, params, b) in builtins {
         tools.push(func(name, desc, params));
         routes.push((name.into(), Route::Builtin(b)));
+    }
+    if !knowledge.is_empty() {
+        let names: Vec<&str> = knowledge.iter().map(|(n, _)| n.as_str()).collect();
+        tools.push(func(
+            "search_knowledge",
+            &format!("Search the server's documents ({}) for facts. Use it before answering questions about the server, products or rules.", names.join(", ")),
+            json!({"type": "object", "properties": {"query": {"type": "string", "description": "Keywords to look for"}}, "required": ["query"]}),
+        ));
+        routes.push(("search_knowledge".into(), Route::Knowledge));
     }
     if cfg.can_close {
         tools.push(func(
@@ -468,6 +504,7 @@ pub async fn run(ai: &ai::Client, cfg: &AgentConfig, t: &TicketInfo, history: &[
             let mut acts = vec![];
             let result = match routes.iter().find(|(n, _)| *n == name).map(|(_, r)| r) {
                 Some(Route::Builtin(b)) => builtin(*b, &args, t, &mut acts).await,
+                Some(Route::Knowledge) => crate::archive::search(knowledge, args["query"].as_str().unwrap_or(""), 4),
                 Some(Route::Escalate) => {
                     acts.push(Action::Escalate(reason));
                     "Staff have been pinged and will join. Tell the user in one short sentence.".to_string()
@@ -563,7 +600,7 @@ async fn builtin(b: Builtin, args: &Value, t: &TicketInfo, actions: &mut Vec<Act
     }
 }
 
-fn utc(secs: u64) -> String {
+pub fn utc(secs: u64) -> String {
     let days = (secs / 86400) as i64;
     let rem = secs % 86400;
     // civil-from-days (Howard Hinnant)
@@ -588,6 +625,10 @@ async fn read_page(url: &str) -> Result<String> {
     let body = read_limited(r, 512 * 1024).await?;
     let text = if html { html_text(&body) } else { body };
     Ok(truncate(&text, 8000))
+}
+
+pub fn html_to_text(html: &str) -> String {
+    html_text(html)
 }
 
 /// Rough HTML to text: drops script/style/head, tags, and collapses whitespace.

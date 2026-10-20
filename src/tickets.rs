@@ -949,6 +949,7 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
         .await
         .ok();
 
+    let share = archive_ticket(ctx, data, t.id).await;
     if let Some(log_id) = s.as_ref().and_then(|s| s.log_channel_id) {
         let mut text = format!("Ticket #{} ({}) by <@{}> closed by {}", t.id, t.subject, t.user_id, by_id.mention());
         if !reason.is_empty() {
@@ -963,6 +964,10 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
                 serenity::CreateMessage::new()
                     .content(text.chars().take(1900).collect::<String>())
                     .allowed_mentions(serenity::CreateAllowedMentions::new())
+                    .components(match &share {
+                        Some(url) => vec![serenity::CreateActionRow::Buttons(vec![serenity::CreateButton::new_link(url).label("View transcript")])],
+                        None => vec![],
+                    })
                     .add_file(serenity::CreateAttachment::bytes(transcript.into_bytes(), format!("ticket-{}.txt", t.id))),
             )
             .await
@@ -973,7 +978,6 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
         ask_rating(ctx, &t).await;
     }
 
-    archive_ticket(data, t.id).await;
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     channel_id.delete(&ctx.http).await.ok();
     Ok(true)
@@ -1008,20 +1012,31 @@ async fn archive_attachment(data: Data, msg_id: i64, url: String, name: String, 
     }
 }
 
-/// Full ticket (meta + every message) as zstd JSON in the archive.
-async fn archive_ticket(data: &Data, id: i64) {
-    let Some(store) = data.store.clone() else { return };
+/// Full ticket as zstd JSON plus a shareable HTML transcript. Returns the share link.
+async fn archive_ticket(ctx: &serenity::Context, data: &Data, id: i64) -> Option<String> {
+    let store = data.store.clone()?;
     let run = async {
         let t = data.db.by_id(id).await?.context("ticket gone")?;
-        let doc = crate::archive::ticket_doc(&t, data.db.messages_json(id).await?);
-        let packed = crate::archive::pack_ticket(&doc)?;
+        let msgs = data.db.messages_json(id).await?;
+        let doc = crate::archive::ticket_doc(&t, msgs.clone());
         let key = crate::archive::ticket_key(t.guild_id, t.id);
-        store.put(&key, packed).await?;
+        store.put(&key, crate::archive::pack_ticket(&doc)?).await?;
         data.db.set_archive(id, &key).await?;
-        anyhow::Ok(())
+        let token = crate::archive::random_token();
+        let base = format!("{}/share/{}/{token}", dashboard_url(), t.id);
+        let guild = ctx.cache.guild(serenity::GuildId::new(t.guild_id as u64)).map(|g| g.name.to_string()).unwrap_or_default();
+        let html = crate::archive::render_html(&t, &guild, &msgs, &format!("{base}/files"));
+        let packed = zstd::bulk::compress(html.as_bytes(), 19)?;
+        store.put(&crate::archive::transcript_key(t.guild_id, t.id), packed).await?;
+        data.db.set_share(id, &token).await?;
+        anyhow::Ok(base)
     };
-    if let Err(e) = run.await {
-        tracing::warn!("ticket {id} archive failed: {e:#}");
+    match run.await {
+        Ok(url) => Some(url),
+        Err(e) => {
+            tracing::warn!("ticket {id} archive failed: {e:#}");
+            None
+        }
     }
 }
 
@@ -1108,7 +1123,8 @@ pub async fn on_message(ctx: &serenity::Context, msg: &serenity::Message, data: 
         Some((l, p)) if l.0 == "user" => (p.to_vec(), l.1.clone()),
         _ => (history.clone(), content.clone()),
     };
-    let out = agent::run(&data.ai, &cfg, &info, &prior, &last).await;
+    let knowledge = crate::archive::load_knowledge(data.store.as_deref(), &cfg.knowledge).await;
+    let out = agent::run(&data.ai, &cfg, &info, &knowledge, &prior, &last).await;
     drop(typing);
 
     let out = match out {

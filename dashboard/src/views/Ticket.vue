@@ -60,6 +60,7 @@ const rows = computed(() => {
       <dl class="details ticket-details">
         <template v-for="[k, v] in rows" :key="k"><dt>{{ k }}</dt><dd :class="k === 'Priority' ? ['prio', t.priority || 'none'] : ''">{{ v }}</dd></template>
       </dl>
+      <div v-if="t.share_url" class="action-row" style="margin-bottom:16px"><v-btn variant="tonal" :href="t.share_url" target="_blank" rel="noopener">Open shareable transcript</v-btn></div>
       <div class="transcript">
         <p v-if="!lines.length" class="muted">Empty transcript</p>
         <div v-for="(l, i) in lines" :key="i" class="t-line">

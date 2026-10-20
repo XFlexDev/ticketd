@@ -156,6 +156,7 @@ impl Kdb {
                 ("closed_by", "INTEGER NOT NULL DEFAULT 0"),
                 ("close_reason", "TEXT NOT NULL DEFAULT ''"),
                 ("archive_key", "TEXT NOT NULL DEFAULT ''"),
+                ("share_token", "TEXT NOT NULL DEFAULT ''"),
             ],
         )
         .await?;
@@ -170,6 +171,11 @@ impl Kdb {
         .await?;
         self.exec(
             "CREATE TABLE IF NOT EXISTS files (hash TEXT PRIMARY KEY, key TEXT NOT NULL, enc TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, stored INTEGER NOT NULL, created_at INTEGER NOT NULL)",
+            &[],
+        )
+        .await?;
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS backups (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, key TEXT NOT NULL, what TEXT NOT NULL, size INTEGER NOT NULL, created_at INTEGER NOT NULL)",
             &[],
         )
         .await?;
@@ -591,6 +597,55 @@ impl Kdb {
         let rows = self.rows("SELECT COUNT(*), COALESCE(SUM(size),0), COALESCE(SUM(stored),0) FROM files", &[]).await?;
         let r = rows.first().cloned().unwrap_or_default();
         Ok((r[0].as_i64().unwrap_or(0), r[1].as_i64().unwrap_or(0), r[2].as_i64().unwrap_or(0)))
+    }
+
+    pub async fn set_share(&self, ticket_id: i64, token: &str) -> Result<()> {
+        self.exec("UPDATE tickets SET share_token = ? WHERE id = ?", &[json!(token), json!(ticket_id)]).await?;
+        Ok(())
+    }
+
+    pub async fn share_token(&self, ticket_id: i64) -> Result<String> {
+        let rows = self.rows("SELECT share_token FROM tickets WHERE id = ?", &[json!(ticket_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_str().map(str::to_string)).unwrap_or_default())
+    }
+
+    pub async fn add_backup(&self, guild_id: u64, key: &str, what: &str, size: usize) -> Result<()> {
+        self.exec(
+            "INSERT INTO backups (guild_id, key, what, size, created_at) VALUES (?,?,?,?,?)",
+            &[json!(guild_id), json!(key), json!(what), json!(size), json!(now())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// (id, key, what, size, created_at), newest first.
+    pub async fn backups(&self, guild_id: u64) -> Result<Vec<(i64, String, String, i64, i64)>> {
+        let rows = self
+            .rows("SELECT id, key, what, size, created_at FROM backups WHERE guild_id = ? ORDER BY id DESC LIMIT 200", &[json!(guild_id)])
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| (r[0].as_i64().unwrap_or(0), r[1].as_str().unwrap_or("").into(), r[2].as_str().unwrap_or("").into(), r[3].as_i64().unwrap_or(0), r[4].as_i64().unwrap_or(0)))
+            .collect())
+    }
+
+    pub async fn delete_backup(&self, id: i64) -> Result<()> {
+        self.exec("DELETE FROM backups WHERE id = ?", &[json!(id)]).await?;
+        Ok(())
+    }
+
+    /// Replaces all panels of a guild, keeping their ids so posted panels keep working.
+    pub async fn restore_panels(&self, guild_id: u64, panels: &[crate::panels::Panel]) -> Result<()> {
+        self.exec("DELETE FROM panels WHERE guild_id = ?", &[json!(guild_id)]).await?;
+        for p in panels {
+            self.exec("INSERT OR REPLACE INTO panels (id, guild_id, config) VALUES (?,?,?)", &[json!(p.id), json!(guild_id), json!(serde_json::to_string(p)?)])
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn all_tickets(&self, guild_id: u64) -> Result<Vec<Ticket>> {
+        self.tickets_where("guild_id = ? ORDER BY id LIMIT 20000", &[json!(guild_id)]).await
     }
 
     pub async fn set_subject(&self, ticket_id: i64, subject: &str) -> Result<()> {

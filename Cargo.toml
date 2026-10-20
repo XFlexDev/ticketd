@@ -11,6 +11,8 @@ futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "webp", "bmp", "tiff", "jpeg", "gif"] }
 sha2 = "0.10"
 zstd = "0.13"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+pdf-extract = "0.9"
 poise = "0.7.1"
 reqwest = { version = "0.13.5", features = ["form", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }

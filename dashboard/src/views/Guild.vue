@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { mdiArrowLeft, mdiChevronRight } from '@mdi/js'
 import { api } from '../api'
@@ -46,6 +46,30 @@ onMounted(async () => {
     saved.value = JSON.stringify(s.value)
   } catch (e) { error.value = e.message }
 })
+
+const backups = ref(null)
+const restoring = ref(0)
+const exp = ref({ state: 'none' })
+let expTimer
+async function loadBackups() { try { backups.value = (await api(`/api/guilds/${id}/backups`)).backups } catch { backups.value = [] } }
+async function restore(b) {
+  if (!confirm(`Restore ${b.what} from ${new Date(b.at * 1000).toLocaleString()}? Your current setup is backed up first.`)) return
+  restoring.value = b.id
+  try {
+    await api(`/api/guilds/${id}/backups/${b.id}/restore`, { method: 'POST' })
+    toast.value = { show: true, text: 'Restored. Reloading' }
+    setTimeout(() => location.reload(), 800)
+  } catch (e) { toast.value = { show: true, text: e.message } }
+  restoring.value = 0
+}
+async function pollExport() {
+  try { exp.value = await api(`/api/guilds/${id}/export`) } catch {}
+  clearTimeout(expTimer)
+  if (exp.value.state === 'working') expTimer = setTimeout(pollExport, 2500)
+}
+async function startExport() { await api(`/api/guilds/${id}/export`, { method: 'POST' }); exp.value = { state: 'working' }; pollExport() }
+watch(tab, t => { if (t === 'settings' && !backups.value) { loadBackups(); pollExport() } }, { immediate: true })
+onUnmounted(() => clearTimeout(expTimer))
 
 async function save() {
   saving.value = true
@@ -136,6 +160,24 @@ async function save() {
               <v-btn color="primary" :loading="saving" :disabled="!dirty || !s.ticket_category_id" @click="save">Save</v-btn>
               <span v-if="dirty" class="muted small">Unsaved changes</span>
             </div>
+            <section class="settings-section">
+              <h3>Export</h3>
+              <p class="muted small">Every ticket, message and file as one zip. The link works for 7 days.</p>
+              <div class="action-row">
+                <v-btn variant="tonal" :loading="exp.state === 'working'" @click="startExport">Create export</v-btn>
+                <v-btn v-if="exp.state === 'done'" variant="text" color="secondary" :href="exp.url">Download zip</v-btn>
+                <span v-if="exp.state?.startsWith('failed')" class="error-text small">{{ exp.state }}</span>
+              </div>
+            </section>
+            <section class="settings-section">
+              <h3>Backups</h3>
+              <p class="muted small">Saved before every change to settings, panels or the AI agent. Last 50 kept.</p>
+              <p v-if="backups && !backups.length" class="muted small">No backups yet.</p>
+              <div v-for="b in backups || []" :key="b.id" class="file-row">
+                <div class="file-main"><span>{{ new Date(b.at * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) }}</span><span class="muted small">before {{ b.what }} change</span></div>
+                <v-btn variant="text" size="small" :loading="restoring === b.id" @click="restore(b)">Restore</v-btn>
+              </div>
+            </section>
           </div>
         </v-window-item>
       </v-window>

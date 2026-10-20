@@ -11,6 +11,23 @@ const { xs } = useDisplay()
 
 const cfg = ref(null)
 const advanced = ref(false)
+const docInput = ref(null)
+const docBusy = ref(false)
+async function uploadDoc(e) {
+  const f = e.target.files?.[0]
+  e.target.value = ''
+  if (!f) return
+  if (f.size > 5 * 1024 * 1024) return emit('toast', 'Documents can be up to 5 MB')
+  docBusy.value = true
+  try {
+    const r = await fetch(`/api/guilds/${props.guildId}/knowledge?name=${encodeURIComponent(f.name)}`, { method: 'POST', credentials: 'same-origin', body: f })
+    if (!r.ok) throw new Error((await r.text()) || r.statusText)
+    const { doc } = await r.json()
+    cfg.value.knowledge = [...cfg.value.knowledge.filter(d => d.key !== doc.key), doc]
+    emit('toast', `${doc.name} added. Save to keep it`)
+  } catch (err) { emit('toast', err.message) }
+  docBusy.value = false
+}
 const tones = [{ title: 'Friendly', value: '' }, { title: 'Professional', value: 'professional' }, { title: 'Casual', value: 'casual' }, { title: 'Short', value: 'short' }]
 const builtins = [
   ['Ticket info', 'Ticket type, priority, member roles and join date'],
@@ -38,7 +55,7 @@ const templates = [
 onMounted(async () => {
   try {
     const r = await api(`/api/guilds/${props.guildId}/agent`)
-    cfg.value = { ...r.config, welcome: { color: '', title: '', image: '', thumbnail: '', footer: '', footer_icon: '', ...(r.config.welcome || {}) } }
+    cfg.value = { ...r.config, knowledge: r.config.knowledge || [], welcome: { color: '', title: '', image: '', thumbnail: '', footer: '', footer_icon: '', ...(r.config.welcome || {}) } }
     saved.value = JSON.stringify(cfg.value)
   } catch (e) { error.value = e.message }
 })
@@ -180,6 +197,21 @@ async function send() {
           <div class="file-main"><span>{{ m.name }}</span><span class="muted small mono ellipsis">{{ host(m.url) }}</span></div>
           <v-icon :icon="mdiChevronRight" size="20" class="muted" />
         </button>
+      </div>
+    </section>
+
+    <section class="agent-section">
+      <div class="section-head">
+        <div><h2>Knowledge</h2><p class="muted small">Upload docs, FAQs, rules or price lists. The AI searches them before answering. Text, Markdown, JSON, CSV, HTML or PDF, up to 5 MB.</p></div>
+        <v-btn variant="text" color="secondary" :prepend-icon="mdiPlus" :loading="docBusy" :disabled="cfg.knowledge.length >= 30" @click="docInput.click()">Upload</v-btn>
+      </div>
+      <input ref="docInput" type="file" accept=".txt,.md,.json,.csv,.html,.htm,.pdf,.log,.yml,.yaml,.toml" hidden @change="uploadDoc">
+      <div v-if="cfg.knowledge.length" class="row-list">
+        <div v-for="(d, i) in cfg.knowledge" :key="d.key" class="file-row">
+          <div class="file-main"><span class="ellipsis">{{ d.name }}</span></div>
+          <span class="muted small mono">{{ d.chars.toLocaleString() }} chars</span>
+          <v-btn variant="text" size="small" :icon="mdiClose" aria-label="Remove" @click="cfg.knowledge.splice(i, 1)" />
+        </div>
       </div>
     </section>
 

@@ -20,7 +20,7 @@ onMounted(() => loadSession())
   <v-app>
     <v-app-bar flat border="b" height="64">
       <v-app-bar-title class="brand">
-        <router-link to="/" class="brand-link">Kreatix <span class="brand-secondary">Tickets</span></router-link>
+        <router-link to="/" class="brand-link">Kev</router-link>
       </v-app-bar-title>
       <template v-if="!mobile">
         <v-btn to="/" variant="text" exact>Servers</v-btn>

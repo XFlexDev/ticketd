@@ -113,7 +113,7 @@ async fn greet_ticket(
 }
 
 /// /setup — pick where tickets go and who mods them (Manage Server only).
-#[poise::command(slash_command, guild_only, required_permissions = "MANAGE_GUILD")]
+#[poise::command(slash_command, guild_only, required_permissions = "MANAGE_GUILD", default_member_permissions = "MANAGE_GUILD")]
 pub async fn setup(
     ctx: Context<'_>,
     #[description = "Category where ticket channels are created"] category: serenity::Channel,
@@ -141,7 +141,7 @@ pub async fn setup(
 }
 
 /// /open — create a ticket.
-#[poise::command(slash_command, guild_only)]
+#[poise::command(slash_command, guild_only, rename = "open")]
 pub async fn ticket_open(
     ctx: Context<'_>,
     #[description = "What do you need help with?"] subject: Option<String>,
@@ -167,7 +167,7 @@ pub async fn ticket_open(
 }
 
 /// /panel — post the "open a ticket" panel in this channel (mods only).
-#[poise::command(slash_command, guild_only)]
+#[poise::command(slash_command, guild_only, rename = "panel", required_permissions = "MANAGE_GUILD", default_member_permissions = "MANAGE_GUILD")]
 pub async fn ticket_panel(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild) = ctx.guild_id() else { return Ok(()) };
     let s = match settings(ctx.data(), guild).await {
@@ -203,14 +203,14 @@ pub async fn ticket_panel(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// /close — close the ticket you're in (saves transcript + AI summary).
-#[poise::command(slash_command, guild_only)]
+#[poise::command(slash_command, guild_only, rename = "close")]
 pub async fn ticket_close(ctx: Context<'_>) -> Result<(), Error> {
     close_current(ctx.serenity_context(), ctx.data(), ctx.channel_id(), ctx.author()).await?;
     Ok(())
 }
 
 /// /add — add a user to this ticket.
-#[poise::command(slash_command, guild_only)]
+#[poise::command(slash_command, guild_only, rename = "add")]
 pub async fn ticket_add(ctx: Context<'_>, #[description = "User to add"] user: serenity::User) -> Result<(), Error> {
     let channel = ctx.guild_channel().await.ok_or_else(|| anyhow::anyhow!("not a guild channel"))?;
     channel
@@ -229,7 +229,7 @@ pub async fn ticket_add(ctx: Context<'_>, #[description = "User to add"] user: s
 }
 
 /// /remove — remove a user from this ticket.
-#[poise::command(slash_command, guild_only)]
+#[poise::command(slash_command, guild_only, rename = "remove")]
 pub async fn ticket_remove(ctx: Context<'_>, #[description = "User to remove"] user: serenity::User) -> Result<(), Error> {
     let channel = ctx.guild_channel().await.ok_or_else(|| anyhow::anyhow!("not a guild channel"))?;
     channel
@@ -248,7 +248,7 @@ pub async fn ticket_remove(ctx: Context<'_>, #[description = "User to remove"] u
 }
 
 /// /transcript — dump this ticket's transcript.
-#[poise::command(slash_command, guild_only)]
+#[poise::command(slash_command, guild_only, rename = "transcript")]
 pub async fn ticket_transcript(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let Some(t) = ctx.data().db.by_channel(ctx.channel_id().get()).await? else {

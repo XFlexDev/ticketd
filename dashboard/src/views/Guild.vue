@@ -79,14 +79,14 @@ async function save() {
         <v-window-item value="settings">
           <div class="settings-form">
             <v-select v-model="s.ticket_category_id" :items="categories" label="Ticket category" :loading="!guild" hint="New ticket channels go here" persistent-hint class="field-block" />
-            <v-select v-model="s.mod_role_id" :items="roles" label="Staff role" :loading="!guild" hint="Can see and answer every ticket" persistent-hint class="field-block" />
+            <v-select v-model="s.mod_role_id" :items="roles" label="Extra staff role" clearable :loading="!guild" hint="Owner and admins always have access. Optional" persistent-hint class="field-block" />
             <v-select v-model="s.log_channel_id" :items="textChannels" label="Log channel" clearable :loading="!guild" hint="Summaries and transcripts are posted here. Optional" persistent-hint class="field-block" />
             <div class="switch-row">
               <div><h3>AI replies</h3><p class="muted small">Answers members until staff joins</p></div>
               <v-switch v-model="s.ai_enabled" aria-label="AI replies" />
             </div>
             <div class="action-row">
-              <v-btn color="primary" :loading="saving" :disabled="!dirty || !s.ticket_category_id || !s.mod_role_id" @click="save">Save</v-btn>
+              <v-btn color="primary" :loading="saving" :disabled="!dirty || !s.ticket_category_id" @click="save">Save</v-btn>
               <span v-if="dirty" class="muted small">Unsaved changes</span>
             </div>
           </div>

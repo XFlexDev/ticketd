@@ -16,6 +16,27 @@ async fn settings(data: &Data, guild_id: serenity::GuildId) -> Result<Settings> 
         .ok_or_else(|| anyhow::anyhow!("This server isn't set up yet — an admin must run `/setup` first."))
 }
 
+/// Staff = server owner, anyone with Administrator/Manage Server, or the optional staff role.
+pub fn is_staff(cache: &serenity::Cache, guild: serenity::GuildId, user: serenity::UserId, roles: &[serenity::RoleId], s: &Settings) -> bool {
+    if s.mod_role_id != 0 && roles.contains(&serenity::RoleId::new(s.mod_role_id as u64)) {
+        return true;
+    }
+    let Some(g) = cache.guild(guild) else { return false };
+    g.owner_id == user
+        || roles
+            .iter()
+            .filter_map(|r| g.roles.get(r))
+            .any(|r| r.permissions.intersects(serenity::Permissions::ADMINISTRATOR | serenity::Permissions::MANAGE_GUILD))
+}
+
+async fn guild_owner(ctx: &serenity::Context, guild: serenity::GuildId) -> Option<serenity::UserId> {
+    let cached = ctx.cache.guild(guild).map(|g| g.owner_id);
+    match cached {
+        Some(o) => Some(o),
+        None => guild.to_partial_guild(&ctx.http).await.ok().map(|g| g.owner_id),
+    }
+}
+
 async fn create_ticket_channel(
     ctx: &serenity::Context,
     data: &Data,
@@ -24,19 +45,33 @@ async fn create_ticket_channel(
     user: &serenity::User,
     subject: &str,
 ) -> Result<(i64, serenity::ChannelId)> {
+    if s.ticket_category_id == 0 {
+        anyhow::bail!("No ticket category set. An admin must run `/setup` or pick one in the dashboard.");
+    }
     let everyone_deny = serenity::PermissionOverwrite {
         allow: serenity::Permissions::empty(),
         deny: serenity::Permissions::VIEW_CHANNEL,
         kind: serenity::PermissionOverwriteType::Role(serenity::RoleId::new(guild.get())),
     };
-    let mod_allow = serenity::PermissionOverwrite {
-        allow: serenity::Permissions::VIEW_CHANNEL
-            | serenity::Permissions::SEND_MESSAGES
-            | serenity::Permissions::READ_MESSAGE_HISTORY
-            | serenity::Permissions::MANAGE_MESSAGES,
-        deny: serenity::Permissions::empty(),
-        kind: serenity::PermissionOverwriteType::Role(serenity::RoleId::new(s.mod_role_id as u64)),
-    };
+    let staff_perms = serenity::Permissions::VIEW_CHANNEL
+        | serenity::Permissions::SEND_MESSAGES
+        | serenity::Permissions::READ_MESSAGE_HISTORY
+        | serenity::Permissions::MANAGE_MESSAGES;
+    let mut staff_allow = vec![];
+    if s.mod_role_id != 0 {
+        staff_allow.push(serenity::PermissionOverwrite {
+            allow: staff_perms,
+            deny: serenity::Permissions::empty(),
+            kind: serenity::PermissionOverwriteType::Role(serenity::RoleId::new(s.mod_role_id as u64)),
+        });
+    }
+    if let Some(owner) = guild_owner(ctx, guild).await.filter(|o| *o != user.id) {
+        staff_allow.push(serenity::PermissionOverwrite {
+            allow: staff_perms,
+            deny: serenity::Permissions::empty(),
+            kind: serenity::PermissionOverwriteType::Member(owner),
+        });
+    }
     let user_allow = serenity::PermissionOverwrite {
         allow: serenity::Permissions::VIEW_CHANNEL
             | serenity::Permissions::SEND_MESSAGES
@@ -64,7 +99,7 @@ async fn create_ticket_channel(
             serenity::CreateChannel::new(name)
                 .kind(serenity::ChannelType::Text)
                 .category(serenity::ChannelId::new(s.ticket_category_id as u64))
-                .permissions(vec![everyone_deny, mod_allow, user_allow, bot_allow])
+                .permissions([vec![everyone_deny, user_allow, bot_allow], staff_allow].concat())
                 .topic(format!("Ticket by {} ({})", user.name, subject)),
         )
         .await?;
@@ -117,7 +152,7 @@ async fn greet_ticket(
 pub async fn setup(
     ctx: Context<'_>,
     #[description = "Category where ticket channels are created"] category: serenity::Channel,
-    #[description = "Role that can see and manage all tickets"] mod_role: serenity::Role,
+    #[description = "Extra staff role (owner and admins always have access)"] staff_role: Option<serenity::Role>,
     #[description = "Channel for closed-ticket transcripts (optional)"] log_channel: Option<serenity::Channel>,
     #[description = "AI auto-replies in tickets (default on)"] ai: Option<bool>,
 ) -> Result<(), Error> {
@@ -125,15 +160,15 @@ pub async fn setup(
     let s = Settings {
         guild_id: guild.get() as i64,
         ticket_category_id: category.id().get() as i64,
-        mod_role_id: mod_role.id.get() as i64,
+        mod_role_id: staff_role.as_ref().map(|r| r.id.get() as i64).unwrap_or(0),
         log_channel_id: log_channel.map(|c| c.id().get() as i64),
         ai_enabled: ai.unwrap_or(true),
     };
     ctx.data().db.upsert_settings(&s).await?;
     ctx.say(format!(
-        "Setup saved: tickets → <#{}>, mods → {}, logs → {}",
+        "Setup saved: tickets → <#{}>, staff → owner + admins{}, logs → {}",
         s.ticket_category_id,
-        mod_role.mention(),
+        staff_role.map(|r| format!(" + {}", r.mention())).unwrap_or_default(),
         s.log_channel_id.map(|c| format!("<#{c}>")).unwrap_or_else(|| "off".into())
     ))
     .await?;
@@ -178,8 +213,8 @@ pub async fn ticket_panel(ctx: Context<'_>) -> Result<(), Error> {
         }
     };
     let member = ctx.author_member().await.ok_or_else(|| anyhow::anyhow!("members only"))?;
-    if !member.roles.contains(&serenity::RoleId::new(s.mod_role_id as u64)) {
-        ctx.say("Mods only.").await?;
+    if !is_staff(&ctx.serenity_context().cache, guild, member.user.id, &member.roles, &s) {
+        ctx.say("Staff only.").await?;
         return Ok(());
     }
     let button = serenity::CreateButton::new("ticket:open")
@@ -379,9 +414,7 @@ pub async fn on_message(ctx: &serenity::Context, msg: &serenity::Message, data: 
     }
 
     let member = msg.member.as_ref();
-    let staff = member
-        .map(|m| m.roles.contains(&serenity::RoleId::new(s.mod_role_id as u64)))
-        .unwrap_or(false);
+    let staff = member.is_some_and(|m| is_staff(&ctx.cache, guild_id, msg.author.id, &m.roles, &s));
     data.db.log_message(t.id, &msg.author.name, msg.author.id.get(), &msg.content, staff).await?;
 
     // Only auto-reply to the ticket opener / non-staff; staff messages stay silent.

@@ -10,5 +10,5 @@
   </div>
 </template>
 <script setup>
-const invite = `https://discord.com/oauth2/authorize?scope=bot%20applications.commands&permissions=268435456`
+const invite = 'https://discord.com/oauth2/authorize?client_id=1561997078039887873&scope=bot%20applications.commands&permissions=93200'
 </script>

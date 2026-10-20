@@ -1,25 +1,50 @@
+<script setup>
+import { computed, onMounted } from 'vue'
+import { useTheme, useDisplay } from 'vuetify'
+import { mdiDotsVertical, mdiLogout, mdiWeatherNight, mdiWhiteBalanceSunny } from '@mdi/js'
+import { session, loadSession, inviteUrl } from './api'
+
+const theme = useTheme()
+const { mobile } = useDisplay({ mobileBreakpoint: 960 })
+const isDark = computed(() => theme.global.name.value === 'dark')
+function toggleTheme() {
+  const next = isDark.value ? 'light' : 'dark'
+  theme.global.name.value = next
+  document.documentElement.style.background = next === 'dark' ? '#000' : '#fff'
+  localStorage.setItem('kt-theme', next)
+}
+onMounted(() => loadSession())
+</script>
+
 <template>
   <v-app>
-    <v-app-bar flat border color="white">
-      <v-app-bar-title class="font-weight-bold">
-        <router-link to="/" style="text-decoration:none;color:inherit">ticketd</router-link>
+    <v-app-bar flat border="b" height="64">
+      <v-app-bar-title class="brand">
+        <router-link to="/" class="brand-link">Kreatix <span class="brand-secondary">Tickets</span></router-link>
       </v-app-bar-title>
-      <v-spacer />
-      <v-btn v-if="me" to="/servers" variant="text">Servers</v-btn>
-      <v-btn v-if="!me" href="/api/auth/discord" color="primary" variant="flat" prepend-icon="mdi-discord">Login</v-btn>
+      <template v-if="!mobile">
+        <v-btn to="/" variant="text" exact>Servers</v-btn>
+        <v-btn :href="inviteUrl" target="_blank" rel="noopener" variant="text">Add to Discord</v-btn>
+        <v-btn :icon="isDark ? mdiWhiteBalanceSunny : mdiWeatherNight" variant="text" aria-label="Toggle theme" @click="toggleTheme" />
+        <v-btn v-if="session.user" :icon="mdiLogout" variant="text" href="/api/logout" aria-label="Sign out" />
+      </template>
       <v-menu v-else>
-        <template #activator="{ props }"><v-btn v-bind="props" variant="text">{{ me.name }}</v-btn></template>
-        <v-list density="compact"><v-list-item href="/api/logout" title="Log out" prepend-icon="mdi-logout" /></v-list>
+        <template #activator="{ props }"><v-btn v-bind="props" :icon="mdiDotsVertical" variant="text" aria-label="More options" /></template>
+        <v-list min-width="200">
+          <v-list-item to="/" title="Servers" />
+          <v-list-item :href="inviteUrl" target="_blank" title="Add to Discord" />
+          <v-list-item :title="isDark ? 'Light theme' : 'Dark theme'" @click="toggleTheme" />
+          <template v-if="session.user">
+            <v-divider />
+            <v-list-item href="/api/logout" title="Sign out" />
+          </template>
+        </v-list>
       </v-menu>
     </v-app-bar>
-    <v-main><v-container><router-view @loaded="onLoaded" /></v-container></v-main>
-    <v-footer class="justify-center text-caption" color="white" border>© {{ new Date().getFullYear() }} ticketd — Kreatix</v-footer>
+    <v-main>
+      <router-view v-slot="{ Component, route }">
+        <transition name="pane" mode="out-in"><component :is="Component" :key="route.fullPath" /></transition>
+      </router-view>
+    </v-main>
   </v-app>
 </template>
-<script setup>
-import { ref, onMounted } from 'vue'
-import { api } from './api'
-const me = ref(null)
-onMounted(async () => { try { const d = await api('/api/me'); me.value = d.user } catch {} })
-function onLoaded(u) { me.value = u }
-</script>

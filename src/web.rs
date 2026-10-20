@@ -23,15 +23,33 @@ struct Web {
 }
 
 impl Web {
-    async fn session(&self, headers: &HeaderMap) -> Option<(i64, String, Vec<i64>)> {
+    async fn raw_session(&self, headers: &HeaderMap) -> Option<(i64, String, String)> {
         let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
         let token = cookie.split(';').find_map(|c| {
             let c = c.trim();
             c.strip_prefix("tk_session=").map(str::to_string)
         })?;
-        let (user_id, name, guilds_json) = self.data.db.session(&token).await.ok()??;
-        let guilds: Vec<i64> = serde_json::from_str(&guilds_json).unwrap_or_default();
+        self.data.db.session(&token).await.ok()?
+    }
+
+    async fn session(&self, headers: &HeaderMap) -> Option<(i64, String, Vec<i64>)> {
+        let (user_id, name, guilds_json) = self.raw_session(headers).await?;
+        let guilds = parse_guilds(&guilds_json).iter().filter_map(gid).collect();
         Some((user_id, name, guilds))
+    }
+
+    async fn discord_list(&self, path: &str) -> Vec<Value> {
+        match self
+            .http
+            .get(format!("https://discord.com/api/v10/{path}"))
+            .header(header::AUTHORIZATION, format!("Bot {}", self.bot_token))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(r) => r.json().await.unwrap_or_default(),
+            Err(_) => vec![],
+        }
     }
 
     fn require_guild(&self, session: &Option<(i64, String, Vec<i64>)>, guild_id: u64) -> Result<(), StatusCode> {
@@ -129,67 +147,39 @@ async fn auth_callback(State(w): State<Web>, Query(q): Query<Cb>) -> Response {
     };
 
     // keep guilds where user can Manage Server AND the bot is present
-    let bot_guilds_resp = w
-        .http
-        .get("https://discord.com/api/v10/users/@me/guilds")
-        .bearer_auth(&w.bot_token)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status());
-    let bot_guild_list: Vec<Value> = match bot_guilds_resp {
-        Ok(r) => r.json().await.unwrap_or_default(),
-        Err(_) => vec![],
-    };
+    let bot_guild_list = w.discord_list("users/@me/guilds?limit=200").await;
     let bot_guilds: std::collections::HashSet<i64> = bot_guild_list
         .iter()
         .filter_map(|g| g["id"].as_str()?.parse().ok())
         .collect();
 
-    let admin_guilds: Vec<i64> = guilds
+    let admin_guilds: Vec<Value> = guilds
         .iter()
         .filter(|g| {
             g["permissions"].as_str().and_then(|p| p.parse::<i64>().ok()).map(|p| p & MANAGE_GUILD != 0).unwrap_or(false)
         })
-        .filter_map(|g| g["id"].as_str()?.parse::<i64>().ok())
-        .filter(|id| bot_guilds.contains(id))
+        .filter(|g| gid(g).is_some_and(|id| bot_guilds.contains(&id)))
+        .map(|g| json!({"id": g["id"], "name": g["name"], "icon": g["icon"]}))
         .collect();
 
     let user_id: i64 = user["id"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
     let user_name = user["username"].as_str().unwrap_or("").to_string();
-    let session_token = format!("{:x}{:x}", rand_u64(), rand_u64());
+    let session_token = random_token();
     let expires = now_secs() + 30 * 86400;
     if let Err(e) = w.data.db.save_session(&session_token, user_id as u64, &user_name, &serde_json::to_string(&admin_guilds).unwrap(), expires).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
-    let cookie = format!("tk_session={session_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}", 30 * 86400);
+    let cookie = format!("tk_session={session_token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={}", 30 * 86400);
     let mut resp = Redirect::to("/").into_response();
     resp.headers_mut().insert(header::SET_COOKIE, cookie.parse().unwrap());
     resp
 }
 
 async fn me(State(w): State<Web>, headers: HeaderMap) -> Response {
-    match w.session(&headers).await {
-        Some((user_id, name, guilds)) => {
-            let mut out = vec![];
-            for g in guilds {
-                let info: Option<Value> = match w
-                    .http
-                    .get(format!("https://discord.com/api/v10/guilds/{g}"))
-                    .bearer_auth(&w.bot_token)
-                    .send()
-                    .await
-                    .and_then(|r| r.error_for_status())
-                {
-                    Ok(r) => r.json().await.ok(),
-                    Err(_) => None,
-                };
-                out.push(match info {
-                    Some(v) => json!({"id": g.to_string(), "name": v["name"], "icon": v["icon"]}),
-                    None => json!({"id": g.to_string()}),
-                });
-            }
-            Json(json!({"user": {"id": user_id.to_string(), "name": name}, "guilds": out})).into_response()
+    match w.raw_session(&headers).await {
+        Some((user_id, name, guilds_json)) => {
+            Json(json!({"user": {"id": user_id.to_string(), "name": name}, "guilds": parse_guilds(&guilds_json)})).into_response()
         }
         None => StatusCode::UNAUTHORIZED.into_response(),
     }
@@ -200,9 +190,32 @@ async fn get_guild(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Pat
     if let Err(s) = w.require_guild(&session, guild_id) {
         return s.into_response();
     }
-    let s = w.data.db.settings(guild_id).await.ok().flatten();
+    let meta = match w.raw_session(&headers).await {
+        Some((_, _, j)) => parse_guilds(&j).into_iter().find(|g| gid(g) == Some(guild_id as i64)),
+        None => None,
+    }
+    .unwrap_or_default();
+    let (ch_path, role_path) = (format!("guilds/{guild_id}/channels"), format!("guilds/{guild_id}/roles"));
+    let (s, channels, roles) = tokio::join!(w.data.db.settings(guild_id), w.discord_list(&ch_path), w.discord_list(&role_path));
+    let s = s.ok().flatten();
+    let mut channels: Vec<Value> = channels
+        .iter()
+        .filter(|c| matches!(c["type"].as_i64(), Some(0 | 4 | 5)))
+        .map(|c| json!({"id": c["id"], "name": c["name"], "type": c["type"], "position": c["position"]}))
+        .collect();
+    channels.sort_by_key(|c| c["position"].as_i64().unwrap_or(0));
+    let mut roles: Vec<Value> = roles
+        .iter()
+        .filter(|r| r["id"].as_str() != Some(&guild_id.to_string()) && !r["managed"].as_bool().unwrap_or(false))
+        .map(|r| json!({"id": r["id"], "name": r["name"], "color": r["color"], "position": r["position"]}))
+        .collect();
+    roles.sort_by_key(|r| -r["position"].as_i64().unwrap_or(0));
     Json(json!({
         "guild_id": guild_id.to_string(),
+        "name": meta["name"],
+        "icon": meta["icon"],
+        "channels": channels,
+        "roles": roles,
         "settings": s.map(|s| json!({
             "ticket_category_id": s.ticket_category_id.to_string(),
             "mod_role_id": s.mod_role_id.to_string(),
@@ -298,10 +311,18 @@ fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-fn rand_u64() -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = RandomState::new().build_hasher();
-    h.write_u64(now_secs() as u64);
-    h.finish()
+fn random_token() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 32];
+    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).expect("urandom");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_guilds(j: &str) -> Vec<Value> {
+    let v: Vec<Value> = serde_json::from_str(j).unwrap_or_default();
+    v.into_iter().map(|g| if g.is_object() { g } else { json!({"id": g.to_string()}) }).collect()
+}
+
+fn gid(g: &Value) -> Option<i64> {
+    g["id"].as_str()?.parse().ok()
 }

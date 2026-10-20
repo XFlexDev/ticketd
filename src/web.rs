@@ -228,6 +228,8 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/verify", get(get_verify).put(put_verify))
         .route("/api/guilds/{guild_id}/verify/send", post(send_verify))
         .route("/verify/{token}", get(verify_page).post(verify_submit))
+        .route("/api/guilds/{guild_id}/modules/{name}", get(get_module).put(put_module))
+        .route("/api/guilds/{guild_id}/cases", get(list_cases))
         .route("/share/{ticket_id}/{token}", get(share_page))
         .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
@@ -1100,6 +1102,64 @@ fn parse_guilds(j: &str) -> Vec<Value> {
 
 fn gid(g: &Value) -> Option<i64> {
     g["id"].as_str()?.parse().ok()
+}
+
+fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
+    Some(match name {
+        "moderation" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::moderation::ModConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "automod" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::automod::AutomodConfig>(c).ok()).unwrap_or_default()).ok()?,
+        _ => return None,
+    })
+}
+
+async fn get_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, name)): Path<(u64, String)>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let raw = w.data.db.module_config(guild_id, &name).await.ok().flatten();
+    match module_json(&name, raw.as_deref()) {
+        Some(cfg) => Json(json!({"config": cfg})).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, name)): Path<(u64, String)>, Json(body): Json<Value>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let checked: Result<Value, String> = match name.as_str() {
+        "moderation" => serde_json::from_value::<crate::moderation::ModConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "automod" => serde_json::from_value::<crate::automod::AutomodConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let cfg = match checked {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    if let Err(e) = w.data.db.save_module_config(guild_id, &name, &cfg.to_string()).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    if name == "automod" {
+        crate::automod::forget(guild_id);
+    }
+    Json(json!({"config": cfg})).into_response()
+}
+
+async fn list_cases(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    match w.data.db.cases(guild_id, None, 100).await {
+        Ok(c) => Json(json!({"cases": c})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn get_verify(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {

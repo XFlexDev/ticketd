@@ -138,6 +138,13 @@ impl Kdb {
         .await?;
         self.exec("CREATE TABLE IF NOT EXISTS agents (guild_id INTEGER PRIMARY KEY, config TEXT NOT NULL)", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS verify (guild_id INTEGER PRIMARY KEY, config TEXT NOT NULL)", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS modules (guild_id INTEGER NOT NULL, name TEXT NOT NULL, config TEXT NOT NULL, PRIMARY KEY (guild_id, name))", &[]).await?;
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS cases (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, num INTEGER NOT NULL, user_id INTEGER NOT NULL, user_name TEXT NOT NULL, mod_id INTEGER NOT NULL, mod_name TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, duration INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1)",
+            &[],
+        )
+        .await?;
+        self.exec("CREATE INDEX IF NOT EXISTS idx_cases_guild_user ON cases(guild_id, user_id)", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS panels (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, config TEXT NOT NULL)", &[]).await?;
         self.add_columns(
             "tickets",
@@ -693,6 +700,76 @@ impl Kdb {
     }
 
     /// (role, content) pairs for the AI; bot replies are `assistant`.
+    pub async fn module_config(&self, guild_id: u64, name: &str) -> Result<Option<String>> {
+        let rows = self.rows("SELECT config FROM modules WHERE guild_id = ? AND name = ?", &[json!(guild_id), json!(name)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_str()).map(String::from))
+    }
+
+    pub async fn save_module_config(&self, guild_id: u64, name: &str, config: &str) -> Result<()> {
+        self.exec(
+            "INSERT INTO modules (guild_id, name, config) VALUES (?,?,?) ON CONFLICT(guild_id, name) DO UPDATE SET config=excluded.config",
+            &[json!(guild_id), json!(name), json!(config)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_case(&self, guild_id: u64, user_id: u64, user_name: &str, mod_id: u64, mod_name: &str, action: &str, reason: &str, duration: i64) -> Result<i64> {
+        let rows = self.rows("SELECT COALESCE(MAX(num), 0) + 1 FROM cases WHERE guild_id = ?", &[json!(guild_id)]).await?;
+        let num = rows.first().and_then(|r| r[0].as_i64()).unwrap_or(1);
+        let now = now();
+        let expires = if duration > 0 { now + duration } else { 0 };
+        self.exec(
+            "INSERT INTO cases (guild_id, num, user_id, user_name, mod_id, mod_name, action, reason, duration, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            &[json!(guild_id), json!(num), json!(user_id), json!(user_name), json!(mod_id), json!(mod_name), json!(action), json!(reason), json!(duration), json!(now), json!(expires)],
+        )
+        .await?;
+        Ok(num)
+    }
+
+    const CASE_COLS: &str = "num, user_id, user_name, mod_id, mod_name, action, reason, duration, created_at, expires_at, active";
+
+    fn case_json(r: &Value) -> Value {
+        let s = |i: usize| r[i].as_str().unwrap_or("").to_string();
+        let n = |i: usize| r[i].as_i64().unwrap_or(0);
+        json!({"num": n(0), "user_id": n(1).to_string(), "user_name": s(2), "mod_id": n(3).to_string(), "mod_name": s(4), "action": s(5), "reason": s(6), "duration": n(7), "created_at": n(8), "expires_at": n(9), "active": n(10) == 1})
+    }
+
+    pub async fn cases(&self, guild_id: u64, user_id: Option<u64>, limit: i64) -> Result<Vec<Value>> {
+        let rows = match user_id {
+            Some(u) => self.rows(&format!("SELECT {} FROM cases WHERE guild_id = ? AND user_id = ? ORDER BY num DESC LIMIT ?", Self::CASE_COLS), &[json!(guild_id), json!(u), json!(limit)]).await?,
+            None => self.rows(&format!("SELECT {} FROM cases WHERE guild_id = ? ORDER BY num DESC LIMIT ?", Self::CASE_COLS), &[json!(guild_id), json!(limit)]).await?,
+        };
+        Ok(rows.iter().map(Self::case_json).collect())
+    }
+
+    pub async fn case(&self, guild_id: u64, num: i64) -> Result<Option<Value>> {
+        let rows = self.rows(&format!("SELECT {} FROM cases WHERE guild_id = ? AND num = ?", Self::CASE_COLS), &[json!(guild_id), json!(num)]).await?;
+        Ok(rows.first().map(Self::case_json))
+    }
+
+    pub async fn deactivate_case(&self, guild_id: u64, num: i64) -> Result<()> {
+        self.exec("UPDATE cases SET active = 0 WHERE guild_id = ? AND num = ?", &[json!(guild_id), json!(num)]).await?;
+        Ok(())
+    }
+
+    pub async fn active_warns(&self, guild_id: u64, user_id: u64) -> Result<i64> {
+        let rows = self.rows("SELECT COUNT(*) FROM cases WHERE guild_id = ? AND user_id = ? AND action = 'warn' AND active = 1", &[json!(guild_id), json!(user_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_i64()).unwrap_or(0))
+    }
+
+    /// Temp bans that ran out: (guild, num, user).
+    pub async fn expired_bans(&self) -> Result<Vec<(u64, i64, u64)>> {
+        let rows = self.rows("SELECT guild_id, num, user_id FROM cases WHERE action = 'ban' AND active = 1 AND expires_at > 0 AND expires_at <= ?", &[json!(now())]).await?;
+        Ok(rows.iter().map(|r| (r[0].as_i64().unwrap_or(0) as u64, r[1].as_i64().unwrap_or(0), r[2].as_i64().unwrap_or(0) as u64)).collect())
+    }
+
+    pub async fn end_temp_bans(&self, guild_id: u64, user_id: u64) -> Result<()> {
+        self.exec("UPDATE cases SET active = 0 WHERE guild_id = ? AND user_id = ? AND action = 'ban'", &[json!(guild_id), json!(user_id)]).await?;
+        Ok(())
+    }
+
     pub async fn verify_config(&self, guild_id: u64) -> Result<Option<String>> {
         let rows = self.rows("SELECT config FROM verify WHERE guild_id = ?", &[json!(guild_id)]).await?;
         Ok(rows.first().and_then(|r| r[0].as_str()).map(String::from))

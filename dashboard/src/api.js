@@ -24,7 +24,7 @@ export async function api(path, opts = {}) {
   return r.headers.get('content-type')?.includes('json') ? r.json() : r.text()
 }
 
-export const inviteUrl = 'https://discord.com/oauth2/authorize?client_id=1561997078039887873&scope=bot%20applications.commands&permissions=268561424'
+export const inviteUrl = 'https://discord.com/oauth2/authorize?client_id=1561997078039887873&scope=bot%20applications.commands&permissions=1116960058614'
 
 export function guildIcon(g, size = 64) {
   return g?.icon ? `https://cdn.discordapp.com/icons/${g.id}/${g.icon}.webp?size=${size}` : null

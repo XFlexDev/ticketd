@@ -8,10 +8,12 @@ import AdSlot from '../components/AdSlot.vue'
 import Panels from './Panels.vue'
 import Stats from './Stats.vue'
 import Verify from './Verify.vue'
+import Moderation from './Moderation.vue'
+import Automod from './Automod.vue'
 
 const route = useRoute()
 const id = route.params.id
-const tab = ref(['settings', 'agent', 'panels', 'verify', 'stats'].includes(route.query.tab) ? route.query.tab : 'tickets')
+const tab = ref(['settings', 'agent', 'panels', 'verify', 'stats', 'moderation', 'automod'].includes(route.query.tab) ? route.query.tab : 'tickets')
 const filter = ref('open')
 const guild = ref(null)
 const tickets = ref(null)
@@ -98,6 +100,8 @@ async function save() {
       <v-tabs v-model="tab" color="primary" class="workspace-tabs">
         <v-tab value="tickets">Tickets</v-tab>
         <v-tab value="panels">Panels</v-tab>
+        <v-tab value="moderation">Moderation</v-tab>
+        <v-tab value="automod">Automod</v-tab>
         <v-tab value="verify">Verify</v-tab>
         <v-tab value="agent">AI agent</v-tab>
         <v-tab value="stats">Stats</v-tab>
@@ -135,6 +139,12 @@ async function save() {
         </v-window-item>
         <v-window-item value="panels">
           <Panels :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />
+        </v-window-item>
+        <v-window-item value="moderation">
+          <Moderation v-if="tab === 'moderation'" :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />
+        </v-window-item>
+        <v-window-item value="automod">
+          <Automod v-if="tab === 'automod'" :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />
         </v-window-item>
         <v-window-item value="verify">
           <Verify v-if="tab === 'verify'" :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />

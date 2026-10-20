@@ -814,6 +814,9 @@ pub async fn handle_component(ctx: &serenity::Context, interaction: &serenity::I
     }
     let Some(component) = interaction.clone().message_component() else { return Ok(()) };
     let id = component.data.custom_id.clone();
+    if id == "automod:unlock" {
+        return crate::automod::on_unlock_click(ctx, data, &component).await;
+    }
     if id == "verify:start" {
         return crate::verify::on_click(ctx, data, &component).await;
     }

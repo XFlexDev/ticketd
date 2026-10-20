@@ -1,8 +1,10 @@
 mod agent;
 mod archive;
 mod ai;
+mod automod;
 mod db;
 mod gc;
+mod moderation;
 mod panels;
 mod tickets;
 mod verify;
@@ -54,75 +56,6 @@ async fn main() -> Result<()> {
     db.init().await?;
     let ai = Arc::new(ai::Client::from_env()?);
 
-    let options = poise::FrameworkOptions {
-        commands: vec![
-            tickets::ticket_open(),
-            tickets::ticket_close(),
-            tickets::ticket_add(),
-            tickets::ticket_remove(),
-            tickets::ticket_panel(),
-            tickets::ticket_transcript(),
-            tickets::setup(),
-            tickets::ticket_claim(),
-            tickets::ticket_unclaim(),
-            tickets::ticket_transfer(),
-            tickets::ticket_priority(),
-        ],
-        on_error: |err| Box::pin(on_error(err)),
-        event_handler: |fctx, event| {
-            Box::pin(async move {
-                let ctx = fctx.serenity_context;
-                let data = fctx.user_data;
-                if let serenity::FullEvent::InteractionCreate { interaction, .. } = event {
-                    tickets::handle_component(ctx, interaction, data).await?;
-                }
-                if let serenity::FullEvent::Message { new_message, .. } = event {
-                    tickets::on_message(ctx, new_message, data).await?;
-                }
-                Ok(())
-            })
-        },
-        ..Default::default()
-    };
-
-    let dev_guild = cfg.dev_guild_id;
-    let framework = poise::Framework::builder()
-        .options(options)
-        .setup(move |ctx, _ready, framework| {
-            Box::pin(async move {
-                match dev_guild {
-                    Some(g) => {
-                        poise::builtins::register_in_guild(ctx, &framework.options().commands, g).await?;
-                        info!("registered commands in dev guild {g}");
-                    }
-                    None => {
-                        poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                        info!("registered commands globally");
-                    }
-                }
-                let store = archive::Store::from_env().map(Arc::new);
-                if store.is_none() {
-                    tracing::warn!("KST_* not set: ticket archive disabled");
-                }
-                let data = Data { db, cfg, ai, store };
-                tokio::spawn(tickets::sweeper(ctx.clone(), data.clone()));
-                if let Some(store) = data.store.clone() {
-                    tokio::spawn(gc::sweeper(data.db.clone(), store));
-                }
-                if let Some(tx) = WEB_TX.lock().unwrap().take() {
-                    let _ = tx.send(std::sync::Arc::new(data.clone()));
-                }
-                Ok(data)
-            })
-        })
-        .build();
-
-    let intents = serenity::GatewayIntents::GUILDS
-        | serenity::GatewayIntents::GUILD_MESSAGES
-        | serenity::GatewayIntents::MESSAGE_CONTENT;
-
-    let mut client = serenity::ClientBuilder::new(token, intents).framework(framework).await?;
-
     // optional web dashboard/API
     if std::env::var("DASHBOARD_ENABLED").map(|v| v == "1").unwrap_or(false) {
         // share Data with the web server once framework setup finishes
@@ -142,8 +75,104 @@ async fn main() -> Result<()> {
         });
     }
 
-    client.start().await?;
+    let base = serenity::GatewayIntents::GUILDS | serenity::GatewayIntents::GUILD_MESSAGES | serenity::GatewayIntents::MESSAGE_CONTENT;
+    // Server Members is privileged: if it isn't enabled in the dev portal, run without it.
+    for intents in [base | serenity::GatewayIntents::GUILD_MEMBERS, base] {
+        let framework = build_framework(db.clone(), cfg.clone(), ai.clone());
+        let mut client = serenity::ClientBuilder::new(&token, intents).framework(framework).await?;
+        match client.start().await {
+            Err(e) if intents.contains(serenity::GatewayIntents::GUILD_MEMBERS) && e.to_string().to_lowercase().contains("disallowed") => {
+                tracing::warn!("Server Members intent is off in the Discord dev portal: welcome, join logs and anti-raid are disabled");
+            }
+            other => return other.map_err(Into::into),
+        }
+    }
     Ok(())
+}
+
+fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise::Framework<Data, Error> {
+    let dev_guild = cfg.dev_guild_id;
+    let options = poise::FrameworkOptions {
+        commands: vec![
+            tickets::ticket_open(),
+            tickets::ticket_close(),
+            tickets::ticket_add(),
+            tickets::ticket_remove(),
+            tickets::ticket_panel(),
+            tickets::ticket_transcript(),
+            tickets::setup(),
+            tickets::ticket_claim(),
+            tickets::ticket_unclaim(),
+            tickets::ticket_transfer(),
+            tickets::ticket_priority(),
+            moderation::ban(),
+            moderation::unban(),
+            moderation::kick(),
+            moderation::timeout(),
+            moderation::untimeout(),
+            moderation::warn(),
+            moderation::unwarn(),
+            moderation::warnings(),
+            moderation::purge(),
+            moderation::slowmode(),
+            moderation::lock(),
+            moderation::unlock(),
+        ],
+        on_error: |err| Box::pin(on_error(err)),
+        event_handler: |fctx, event| {
+            Box::pin(async move {
+                let ctx = fctx.serenity_context;
+                let data = fctx.user_data;
+                if let serenity::FullEvent::InteractionCreate { interaction, .. } = event {
+                    tickets::handle_component(ctx, interaction, data).await?;
+                }
+                if let serenity::FullEvent::Message { new_message, .. } = event {
+                    if !automod::on_message(ctx, new_message, data).await {
+                        tickets::on_message(ctx, new_message, data).await?;
+                    }
+                }
+                if let serenity::FullEvent::GuildMemberAddition { new_member } = event {
+                    automod::on_join(ctx, data, new_member).await?;
+                }
+                Ok(())
+            })
+        },
+        ..Default::default()
+    };
+
+    poise::Framework::builder()
+        .options(options)
+        .setup(move |ctx, _ready, framework| {
+            Box::pin(async move {
+                match dev_guild {
+                    Some(g) => {
+                        poise::builtins::register_in_guild(ctx, &framework.options().commands, g).await?;
+                        info!("registered commands in dev guild {g}");
+                    }
+                    None => {
+                        poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                        info!("registered commands globally");
+                    }
+                }
+                let store = archive::Store::from_env().map(Arc::new);
+                if store.is_none() {
+                    tracing::warn!("KST_* not set: ticket archive disabled");
+                }
+                let data = Data { db, cfg, ai, store };
+                tokio::spawn(tickets::sweeper(ctx.clone(), data.clone()));
+                tokio::spawn(moderation::sweeper(ctx.clone(), data.clone()));
+                tokio::spawn(automod::scam_refresher());
+                if let Some(store) = data.store.clone() {
+                    tokio::spawn(gc::sweeper(data.db.clone(), store));
+                }
+                if let Some(tx) = WEB_TX.lock().unwrap().take() {
+                    let _ = tx.send(std::sync::Arc::new(data.clone()));
+                }
+                Ok(data)
+            })
+        })
+        .build()
+
 }
 
 async fn on_error(err: poise::FrameworkError<'_, Data, anyhow::Error>) {

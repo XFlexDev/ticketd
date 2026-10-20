@@ -297,31 +297,36 @@ pub async fn ticket_transcript(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+async fn open_from_button(ctx: &serenity::Context, data: &Data, component: &serenity::ComponentInteraction) -> Result<String> {
+    let member = component.member.clone().ok_or_else(|| anyhow::anyhow!("tickets only work inside a server"))?;
+    let guild = component.guild_id.ok_or_else(|| anyhow::anyhow!("tickets only work inside a server"))?;
+    let s = settings(data, guild).await?;
+    if let Some(t) = data.db.open_ticket_for_user(guild.get(), member.user.id.get()).await? {
+        return Ok(format!("You already have an open ticket: <#{}>", t.channel_id));
+    }
+    let (id, ch) = create_ticket_channel(ctx, data, guild, &s, &member.user, "support").await?;
+    greet_ticket(ctx, data, s.ai_enabled && data.cfg.ai_enabled, ch, &member.user, "support", id).await.ok();
+    Ok(format!("Ticket opened: <#{ch}>"))
+}
+
 pub async fn handle_component(ctx: &serenity::Context, interaction: &serenity::Interaction, data: &Data) -> Result<()> {
     let Some(component) = interaction.clone().message_component() else { return Ok(()) };
     match component.data.custom_id.as_str() {
         "ticket:open" => {
             component
-                .create_response(&ctx.http, serenity::CreateInteractionResponse::Acknowledge)
+                .create_response(
+                    &ctx.http,
+                    serenity::CreateInteractionResponse::Defer(serenity::CreateInteractionResponseMessage::new().ephemeral(true)),
+                )
                 .await?;
-            let member = component.member.clone().ok_or_else(|| anyhow::anyhow!("no member"))?;
-            let guild = component.guild_id.ok_or_else(|| anyhow::anyhow!("no guild"))?;
-            let Ok(s) = settings(data, guild).await else { return Ok(()) };
-            if let Some(t) = data.db.open_ticket_for_user(guild.get(), member.user.id.get()).await? {
-                component
-                    .user
-                    .direct_message(&ctx.http, serenity::CreateMessage::new().content(format!("You already have an open ticket: <#{}>", t.channel_id)))
-                    .await
-                    .ok();
-                return Ok(());
-            }
-            let (id, ch) = create_ticket_channel(ctx, data, guild, &s, &member.user, "support").await?;
-            component
-                .user
-                .direct_message(&ctx.http, serenity::CreateMessage::new().content(format!("Ticket opened: <#{ch}>")))
-                .await
-                .ok();
-            greet_ticket(ctx, data, s.ai_enabled && data.cfg.ai_enabled, ch, &member.user, "support", id).await?;
+            let text = match open_from_button(ctx, data, &component).await {
+                Ok(t) => t,
+                Err(e) if e.to_string().contains("Invalid permissions") || e.to_string().contains("Missing Permissions") => {
+                    "I can't create the ticket channel. Give my role **Manage Channels** and **Manage Roles** in the ticket category, or re-invite me from kev.kreatix.dev.".into()
+                }
+                Err(e) => format!("Couldn't open a ticket: {e}"),
+            };
+            component.edit_response(&ctx.http, serenity::EditInteractionResponse::new().content(text)).await?;
         }
         "ticket:close" => {
             let ch = component.channel_id;

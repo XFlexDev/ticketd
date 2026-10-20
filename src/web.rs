@@ -63,7 +63,7 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/settings", put(put_settings))
         .route("/api/guilds/{guild_id}/tickets", get(list_tickets))
         .route("/api/tickets/{ticket_id}/transcript", get(transcript))
-        .fallback_service(ServeDir::new("dashboard/dist"))
+        .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
         .with_state(web))
 }
 
@@ -281,6 +281,13 @@ async fn logout(State(w): State<Web>, headers: HeaderMap) -> Response {
     let mut resp = Redirect::to("/").into_response();
     resp.headers_mut().insert(header::SET_COOKIE, "tk_session=; Path=/; Max-Age=0".parse().unwrap());
     resp
+}
+
+async fn spa_index() -> impl IntoResponse {
+    match tokio::fs::read_to_string("dashboard/dist/index.html").await {
+        Ok(s) => axum::response::Html(s).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "dashboard not built — run `npm run build` in dashboard/").into_response(),
+    }
 }
 
 fn urlencoding(s: &str) -> String {

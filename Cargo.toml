@@ -15,6 +15,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 pdf-extract = "0.9"
 poise = "0.7.1"
 reqwest = { version = "0.13.5", features = ["form", "json"] }
+reqwest12 = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serenity = { version = "0.12.5", features = ["rustls_backend", "collector"] }
@@ -25,3 +26,6 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 feed-rs = "2"
 regex = "1.13.1"
+songbird = { version = "0.6", features = ["builtin-queue"] }
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
+async-trait = "0.1.92"

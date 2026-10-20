@@ -814,6 +814,9 @@ pub async fn handle_component(ctx: &serenity::Context, interaction: &serenity::I
     }
     let Some(component) = interaction.clone().message_component() else { return Ok(()) };
     let id = component.data.custom_id.clone();
+    if id.starts_with("music:") {
+        return crate::music::on_click(ctx, data, &component).await;
+    }
     if id == "giveaway:enter" {
         return crate::giveaways::on_click(ctx, data, &component).await;
     }

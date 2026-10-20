@@ -255,6 +255,7 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/rolemenus/{menu_id}/send", post(send_role_menu))
         .route("/api/guilds/{guild_id}/alerts/test", post(test_alert))
         .route("/api/guilds/{guild_id}/embed", post(send_embed))
+        .route("/api/guilds/{guild_id}/music/hub", post(make_music_hub))
         .route("/share/{ticket_id}/{token}", get(share_page))
         .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
@@ -1139,6 +1140,7 @@ fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
         "leveling" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::leveling::LevelConfig>(c).ok()).unwrap_or_default()).ok()?,
         "alerts" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::alerts::AlertsConfig>(c).ok()).unwrap_or_default()).ok()?,
         "commands" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::custom::CustomConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "music" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::music::MusicConfig>(c).ok()).unwrap_or_default()).ok()?,
         _ => return None,
     })
 }
@@ -1185,6 +1187,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         "commands" => serde_json::from_value::<crate::custom::CustomConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "music" => serde_json::from_value::<crate::music::MusicConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let cfg = match checked {
@@ -1202,6 +1207,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
     }
     if name == "leveling" {
         crate::leveling::forget(guild_id);
+    }
+    if name == "music" {
+        crate::music::forget(guild_id);
     }
     if name == "commands" {
         crate::custom::forget(guild_id);
@@ -1225,6 +1233,35 @@ async fn test_alert(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Pa
         Ok((name, items)) => Json(json!({"name": name, "items": items})).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
+}
+
+async fn make_music_hub(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(b): Json<Value>) -> Response {
+    use poise::serenity_prelude as serenity;
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let mut ch = serenity::CreateChannel::new("Join to create").kind(serenity::ChannelType::Voice);
+    if let Some(cat) = b["category_id"].as_str().and_then(|c| c.parse::<u64>().ok()) {
+        ch = ch.category(serenity::ChannelId::new(cat));
+    }
+    let made = match serenity::GuildId::new(guild_id).create_channel(&*w.bot, ch).await {
+        Ok(c) => c,
+        Err(e) => {
+            let raw = e.to_string();
+            let m = if raw.contains("Missing") || raw.contains("permissions") { "I need Manage Channels to make the channel.".to_string() } else { raw };
+            return (StatusCode::BAD_REQUEST, m).into_response();
+        }
+    };
+    let raw = w.data.db.module_config(guild_id, "music").await.ok().flatten();
+    let mut cfg = raw.and_then(|c| serde_json::from_str::<crate::music::MusicConfig>(&c).ok()).unwrap_or_default();
+    cfg.hub_channel_id = made.id.to_string();
+    let v = serde_json::to_value(&cfg).unwrap_or_default();
+    if let Err(e) = w.data.db.save_module_config(guild_id, "music", &v.to_string()).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    crate::music::forget(guild_id);
+    Json(json!({"config": v, "channel": {"id": made.id.to_string(), "name": made.name, "type": 2}})).into_response()
 }
 
 async fn send_embed(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(b): Json<Value>) -> Response {

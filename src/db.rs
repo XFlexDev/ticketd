@@ -163,6 +163,7 @@ impl Kdb {
         )
         .await?;
         self.exec("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at)", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS lobbies (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL)", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS alert_seen (guild_id INTEGER NOT NULL, feed TEXT NOT NULL, seen TEXT NOT NULL, PRIMARY KEY (guild_id, feed))", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS panels (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, config TEXT NOT NULL)", &[]).await?;
         self.add_columns(
@@ -771,6 +772,27 @@ impl Kdb {
     pub async fn deactivate_case(&self, guild_id: u64, num: i64) -> Result<()> {
         self.exec("UPDATE cases SET active = 0 WHERE guild_id = ? AND num = ?", &[json!(guild_id), json!(num)]).await?;
         Ok(())
+    }
+
+    pub async fn add_lobby(&self, channel_id: u64, guild_id: u64, owner_id: u64) -> Result<()> {
+        self.exec("INSERT OR REPLACE INTO lobbies (channel_id, guild_id, owner_id) VALUES (?,?,?)", &[json!(channel_id), json!(guild_id), json!(owner_id)]).await?;
+        Ok(())
+    }
+
+    pub async fn set_lobby_owner(&self, channel_id: u64, owner_id: u64) -> Result<()> {
+        self.exec("UPDATE lobbies SET owner_id = ? WHERE channel_id = ?", &[json!(owner_id), json!(channel_id)]).await?;
+        Ok(())
+    }
+
+    pub async fn delete_lobby(&self, channel_id: u64) -> Result<()> {
+        self.exec("DELETE FROM lobbies WHERE channel_id = ?", &[json!(channel_id)]).await?;
+        Ok(())
+    }
+
+    /// (channel, guild, owner)
+    pub async fn lobbies(&self) -> Result<Vec<(u64, u64, u64)>> {
+        let rows = self.rows("SELECT channel_id, guild_id, owner_id FROM lobbies", &[]).await?;
+        Ok(rows.iter().filter_map(|r| Some((r[0].as_i64()? as u64, r[1].as_i64()? as u64, r[2].as_i64()? as u64))).collect())
     }
 
     /// (guild_id, config) for every server that configured this module

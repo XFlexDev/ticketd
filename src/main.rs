@@ -10,6 +10,7 @@ mod giveaways;
 mod leveling;
 mod logs;
 mod moderation;
+mod music;
 mod panels;
 mod roles;
 mod tickets;
@@ -20,6 +21,7 @@ mod welcome;
 
 use anyhow::Result;
 use poise::serenity_prelude as serenity;
+use songbird::SerenityInit;
 use std::sync::Arc;
 use tracing::info;
 use std::sync::Mutex;
@@ -93,7 +95,7 @@ async fn main() -> Result<()> {
         let framework = build_framework(db.clone(), cfg.clone(), ai.clone());
         let mut cache = serenity::cache::Settings::default();
         cache.max_messages = 200;
-        let mut client = serenity::ClientBuilder::new(&token, intents).framework(framework).cache_settings(cache).await?;
+        let mut client = serenity::ClientBuilder::new(&token, intents).framework(framework).cache_settings(cache).register_songbird().await?;
         match client.start().await {
             Err(e) if intents.contains(serenity::GatewayIntents::GUILD_MEMBERS) && e.to_string().to_lowercase().contains("disallowed") => {
                 tracing::warn!("Server Members intent is off in the Discord dev portal: welcome, join logs and anti-raid are disabled");
@@ -138,6 +140,13 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
             utility::poll(),
             utility::remind(),
             utility::reminders(),
+            music::play(),
+            music::radio(),
+            music::skip(),
+            music::pause(),
+            music::stop(),
+            music::queue(),
+            music::volume(),
         ]),
         on_error: |err| Box::pin(on_error(err)),
         event_handler: |fctx, event| {
@@ -162,6 +171,9 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                 }
                 if let serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } = event {
                     welcome::on_leave(ctx, data, *guild_id, user).await?;
+                }
+                if let serenity::FullEvent::VoiceStateUpdate { old, new } = event {
+                    music::on_voice(ctx, data, old.as_ref(), new).await;
                 }
                 logs::on_event(ctx, data, event).await;
                 Ok(())
@@ -194,6 +206,7 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                 tokio::spawn(giveaways::sweeper(ctx.clone(), data.clone()));
                 tokio::spawn(utility::sweeper(ctx.clone(), data.clone()));
                 tokio::spawn(alerts::poller(ctx.clone(), data.clone()));
+                tokio::spawn(music::startup(ctx.clone(), data.clone()));
                 tokio::spawn(automod::scam_refresher());
                 if let Some(store) = data.store.clone() {
                     tokio::spawn(gc::sweeper(data.db.clone(), store));

@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 axum = "0.8.9"
 dotenvy = "0.15.7"
+futures = "0.3"
 poise = "0.7.1"
 reqwest = { version = "0.13.5", features = ["form", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }

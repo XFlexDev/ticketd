@@ -4,14 +4,19 @@ import { useRoute } from 'vue-router'
 import { mdiArrowLeft, mdiChevronRight } from '@mdi/js'
 import { api } from '../api'
 import Agent from './Agent.vue'
+import Panels from './Panels.vue'
+import Stats from './Stats.vue'
 
 const route = useRoute()
 const id = route.params.id
-const tab = ref(['settings', 'agent'].includes(route.query.tab) ? route.query.tab : 'tickets')
+const tab = ref(['settings', 'agent', 'panels', 'stats'].includes(route.query.tab) ? route.query.tab : 'tickets')
+const filter = ref('open')
 const guild = ref(null)
 const tickets = ref(null)
 const error = ref('')
-const s = ref({ ticket_category_id: null, mod_role_id: null, log_channel_id: null, ai_enabled: true })
+const s = ref({ ticket_category_id: null, mod_role_id: null, log_channel_id: null, ai_enabled: true, autoclose_hours: 0, close_on_leave: true, ratings: true })
+const autoclose = [{ title: 'Off', value: 0 }, { title: '6 hours', value: 6 }, { title: '12 hours', value: 12 }, { title: '1 day', value: 24 }, { title: '2 days', value: 48 }, { title: '3 days', value: 72 }, { title: '1 week', value: 168 }, { title: '2 weeks', value: 336 }, { title: '30 days', value: 720 }]
+const prioRank = { urgent: 0, high: 1, medium: 2, low: 3, '': 4 }
 const saved = ref(null)
 const saving = ref(false)
 const toast = ref({ show: false, text: '' })
@@ -21,6 +26,16 @@ const textChannels = computed(() => (guild.value?.channels || []).filter(c => c.
 const roles = computed(() => (guild.value?.roles || []).map(r => ({ title: r.name, value: r.id })))
 const dirty = computed(() => JSON.stringify(s.value) !== saved.value)
 const openCount = computed(() => (tickets.value || []).filter(t => t.status === 'open').length)
+const shown = computed(() => {
+  const list = (tickets.value || []).filter(t => filter.value === 'all' || t.status === filter.value)
+  return filter.value === 'open' ? [...list].sort((a, b) => (prioRank[a.priority] ?? 4) - (prioRank[b.priority] ?? 4) || b.id - a.id) : list
+})
+function ago(sec) {
+  const d = Date.now() / 1000 - sec
+  if (d < 3600) return `${Math.max(1, Math.round(d / 60))}m`
+  if (d < 86400) return `${Math.round(d / 3600)}h`
+  return `${Math.round(d / 86400)}d`
+}
 
 onMounted(async () => {
   try {
@@ -56,7 +71,9 @@ async function save() {
     <template v-else>
       <v-tabs v-model="tab" color="primary" class="workspace-tabs">
         <v-tab value="tickets">Tickets</v-tab>
+        <v-tab value="panels">Panels</v-tab>
         <v-tab value="agent">AI agent</v-tab>
+        <v-tab value="stats">Stats</v-tab>
         <v-tab value="settings">Settings</v-tab>
       </v-tabs>
       <v-window v-model="tab">
@@ -67,16 +84,32 @@ async function save() {
             <p class="muted">Run <code>/panel</code> in a channel to post the open-ticket button.</p>
           </div>
           <template v-else>
-            <p class="muted small" style="margin-bottom:8px">{{ openCount }} open · {{ tickets.length }} total</p>
-            <router-link v-for="t in tickets" :key="t.id" :to="`/t/${t.id}`" class="file-row" style="color:inherit;text-decoration:none">
+            <div class="section-head" style="align-items:center;margin-bottom:8px">
+              <p class="muted small">{{ openCount }} open · {{ tickets.length }} total</p>
+              <v-btn-toggle v-model="filter" mandatory density="compact" variant="outlined" divided>
+                <v-btn value="open">Open</v-btn><v-btn value="closed">Closed</v-btn><v-btn value="all">All</v-btn>
+              </v-btn-toggle>
+            </div>
+            <p v-if="!shown.length" class="muted small" style="padding:16px 0">Nothing here.</p>
+            <router-link v-for="t in shown" :key="t.id" :to="`/t/${t.id}`" class="file-row" style="color:inherit;text-decoration:none">
               <div class="file-main">
                 <span class="mono muted">#{{ t.id }}</span>
                 <span class="ticket-subject">{{ t.subject || 'No subject' }}</span>
               </div>
+              <span v-if="t.priority" :class="['prio', t.priority]">{{ t.priority }}</span>
+              <span v-if="t.claimed_by" class="muted small desktop-only">claimed</span>
+              <span v-if="t.rating" class="muted small mono">{{ t.rating }}/5</span>
+              <span class="muted small mono desktop-only">{{ ago(t.created_at) }}</span>
               <span :class="['status', t.status]">{{ t.status }}</span>
               <v-icon :icon="mdiChevronRight" size="20" class="muted" />
             </router-link>
           </template>
+        </v-window-item>
+        <v-window-item value="panels">
+          <Panels :guild-id="id" :guild="guild" @toast="t => (toast = { show: true, text: t })" />
+        </v-window-item>
+        <v-window-item value="stats">
+          <Stats v-if="tab === 'stats'" :guild-id="id" />
         </v-window-item>
         <v-window-item value="agent">
           <Agent :guild-id="id" @toast="t => (toast = { show: true, text: t })" />
@@ -89,6 +122,15 @@ async function save() {
             <div class="switch-row">
               <div><h3>AI replies</h3><p class="muted small">Answers members until staff joins. Set it up in AI agent</p></div>
               <v-switch v-model="s.ai_enabled" aria-label="AI replies" />
+            </div>
+            <v-select v-model="s.autoclose_hours" :items="autoclose" label="Auto-close inactive tickets" hint="Warns the member first, at 75% of the time" persistent-hint class="field-block" />
+            <div class="switch-row">
+              <div><h3>Close when the member leaves</h3><p class="muted small">Checked every 10 minutes</p></div>
+              <v-switch v-model="s.close_on_leave" aria-label="Close when the member leaves" />
+            </div>
+            <div class="switch-row">
+              <div><h3>Ask for a rating</h3><p class="muted small">DMs the member 1 to 5 after closing</p></div>
+              <v-switch v-model="s.ratings" aria-label="Ask for a rating" />
             </div>
             <div class="action-row">
               <v-btn color="primary" :loading="saving" :disabled="!dirty || !s.ticket_category_id" @click="save">Save</v-btn>

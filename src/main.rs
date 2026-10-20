@@ -1,6 +1,7 @@
 mod agent;
 mod ai;
 mod db;
+mod panels;
 mod tickets;
 mod web;
 
@@ -58,6 +59,10 @@ async fn main() -> Result<()> {
             tickets::ticket_panel(),
             tickets::ticket_transcript(),
             tickets::setup(),
+            tickets::ticket_claim(),
+            tickets::ticket_unclaim(),
+            tickets::ticket_transfer(),
+            tickets::ticket_priority(),
         ],
         on_error: |err| Box::pin(on_error(err)),
         event_handler: |fctx, event| {
@@ -92,6 +97,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 let data = Data { db, cfg, ai };
+                tokio::spawn(tickets::sweeper(ctx.clone(), data.clone()));
                 if let Some(tx) = WEB_TX.lock().unwrap().take() {
                     let _ = tx.send(std::sync::Arc::new(data.clone()));
                 }

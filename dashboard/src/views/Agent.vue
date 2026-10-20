@@ -9,6 +9,19 @@ const emit = defineEmits(['toast'])
 const { xs } = useDisplay()
 
 const cfg = ref(null)
+const advanced = ref(false)
+const tones = [{ title: 'Friendly', value: '' }, { title: 'Professional', value: 'professional' }, { title: 'Casual', value: 'casual' }, { title: 'Short', value: 'short' }]
+const builtins = [
+  ['Ticket info', 'Ticket type, priority, member roles and join date'],
+  ['Past tickets', "The member's earlier tickets here"],
+  ['Server info', 'Member count, roles and public channels'],
+  ['Read web pages', 'Your site, docs or status page'],
+  ['Time', 'Current date and time'],
+  ['Set priority', 'Low to urgent'],
+  ['Rename ticket', 'Short topic once it is clear'],
+  ['Staff notes', 'Private notes in the log channel'],
+  ['Escalate', 'Asks first, then pings staff'],
+]
 const saved = ref('')
 const saving = ref(false)
 const error = ref('')
@@ -167,6 +180,50 @@ async function send() {
           <v-icon :icon="mdiChevronRight" size="20" class="muted" />
         </button>
       </div>
+    </section>
+
+    <section class="agent-section">
+      <h2>Built-in tools</h2>
+      <p class="muted small">Always on.</p>
+      <div class="builtin-list">
+        <div v-for="b in builtins" :key="b[0]" class="tool"><span>{{ b[0] }}</span><span class="muted small">{{ b[1] }}</span></div>
+      </div>
+    </section>
+
+    <section class="agent-section">
+      <button class="advanced-toggle" :aria-expanded="advanced" @click="advanced = !advanced">
+        <h2>Advanced</h2>
+        <v-icon :icon="mdiChevronRight" size="20" :class="['muted', 'chev', { open: advanced }]" />
+      </button>
+      <v-expand-transition>
+        <div v-show="advanced" class="advanced">
+          <div class="two-col">
+            <v-select v-model="cfg.tone" :items="tones" label="Tone" />
+            <v-text-field v-model="cfg.language" label="Language" placeholder="Match the member" hint="Leave empty to reply in the member's language" persistent-hint />
+          </div>
+          <div class="slider-row">
+            <div><h3>Creativity</h3><p class="muted small">{{ cfg.temperature <= 0.3 ? 'Precise' : cfg.temperature <= 0.8 ? 'Balanced' : 'Creative' }}</p></div>
+            <v-slider v-model="cfg.temperature" :min="0" :max="1.5" :step="0.1" thumb-label hide-details color="primary" />
+          </div>
+          <div class="slider-row">
+            <div><h3>Reply length</h3><p class="muted small">Up to {{ cfg.max_reply }} characters</p></div>
+            <v-slider v-model="cfg.max_reply" :min="200" :max="1900" :step="100" hide-details color="primary" />
+          </div>
+          <div class="slider-row">
+            <div><h3>Memory</h3><p class="muted small">Last {{ cfg.history }} messages</p></div>
+            <v-slider v-model="cfg.history" :min="2" :max="50" :step="1" hide-details color="primary" />
+          </div>
+          <div class="slider-row">
+            <div><h3>Tool steps</h3><p class="muted small">Up to {{ cfg.max_steps }} rounds of tools per reply</p></div>
+            <v-slider v-model="cfg.max_steps" :min="1" :max="10" :step="1" hide-details color="primary" />
+          </div>
+          <div class="slider-row">
+            <div><h3>Reply delay</h3><p class="muted small">{{ cfg.reply_delay ? `Waits ${cfg.reply_delay}s so members can finish typing` : 'Answers right away' }}</p></div>
+            <v-slider v-model="cfg.reply_delay" :min="0" :max="30" :step="1" hide-details color="primary" />
+          </div>
+          <v-textarea v-model="cfg.greeting" label="Fixed greeting (optional)" auto-grow rows="2" counter="1500" placeholder="Hey {user}! Thanks for opening a {type} ticket. What's going on?" hint="{user} mentions the member, {type} is the ticket type. Empty = the AI writes one" persistent-hint class="field-block" />
+        </div>
+      </v-expand-transition>
     </section>
 
     <div class="action-row sticky-save">

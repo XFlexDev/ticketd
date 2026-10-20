@@ -53,10 +53,20 @@ impl Client {
 
     /// One completion round; returns the assistant message (content and/or tool_calls).
     pub async fn complete(&self, messages: &[serde_json::Value], tools: &[serde_json::Value]) -> Result<serde_json::Value> {
+        self.complete_with(messages, tools, &Opts::default()).await
+    }
+
+    pub fn default_model(&self) -> &str {
+        &self.model
+    }
+
+    /// One completion round with per-server model/temperature overrides.
+    pub async fn complete_with(&self, messages: &[serde_json::Value], tools: &[serde_json::Value], o: &Opts) -> Result<serde_json::Value> {
+        let model = if o.model.is_empty() { self.model.as_str() } else { o.model.as_str() };
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": model,
             "messages": messages,
-            "temperature": 0.4,
+            "temperature": o.temperature.unwrap_or(0.4),
             "max_tokens": 2500,
         });
         if !tools.is_empty() {
@@ -117,6 +127,12 @@ impl Client {
     fn cool(&self, idx: usize) {
         self.cooldowns.lock().unwrap()[idx] = Some(Instant::now());
     }
+}
+
+#[derive(Default)]
+pub struct Opts {
+    pub model: String,
+    pub temperature: Option<f32>,
 }
 
 /// Strips leaked <think> blocks and whitespace.

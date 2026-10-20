@@ -724,3 +724,18 @@ pub async fn startup(ctx: serenity::Context, data: Data) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn radio_stream_decodes() {
+        let url = "http://usa9.fastcast4u.com/proxy/jamz?mp=/1".to_string();
+        let input: Input = HttpRequest::new(STREAM.clone(), url).into();
+        let Input::Live(live, _) = input.make_live_async().await.expect("live") else { panic!("not live") };
+        let parsed = tokio::task::spawn_blocking(move || live.promote(songbird::input::codecs::get_codec_registry(), songbird::input::codecs::get_probe())).await.unwrap().expect("probe");
+        assert!(parsed.is_playable());
+    }
+}

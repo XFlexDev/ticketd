@@ -69,6 +69,10 @@ impl Client {
             "temperature": o.temperature.unwrap_or(0.4),
             "max_tokens": 2500,
         });
+        // Hidden reasoning roughly 5x's latency for support replies; opt back in with LLM_THINKING=1.
+        if std::env::var("LLM_THINKING").map(|v| v != "1").unwrap_or(true) {
+            body["chat_template_kwargs"] = serde_json::json!({"enable_thinking": false});
+        }
         if !tools.is_empty() {
             body["tools"] = serde_json::json!(tools);
             body["tool_choice"] = serde_json::json!("auto");

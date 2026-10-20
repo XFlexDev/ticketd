@@ -64,7 +64,7 @@ function label(d) { return new Date(d * 86400000).toLocaleDateString(undefined, 
       <h3>Tickets per day</h3>
       <div class="bars" role="img" :aria-label="`Tickets opened per day over ${days} days`">
         <div v-for="d in series" :key="d.day" class="bar" :title="`${label(d.day)}: ${d.opened} opened, ${d.closed} closed`">
-          <span :style="{ height: (d.opened / peak * 100) + '%' }" />
+          <span :class="{ zero: !d.opened }" :style="{ height: (d.opened / peak * 100) + '%' }" />
         </div>
       </div>
       <div class="bar-axis muted small"><span>{{ label(series[0].day) }}</span><span>Today</span></div>

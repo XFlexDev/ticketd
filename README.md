@@ -13,11 +13,14 @@ Free, self-hostable Discord ticket bot in Rust with an AI support agent in the l
 | Command | Who | What |
 |---|---|---|
 | `/setup` | Manage Server | pick ticket category, mod role, optional log channel, toggle AI |
-| `/panel` | mods | post an "Open a ticket" button panel |
+| `/panel [name]` | staff | post a ticket panel (build panels with ticket types, forms and routing in the dashboard) |
 | `/open` | anyone | open a ticket with an optional subject |
 | `/close` | anyone in ticket | close, summarize, save transcript |
 | `/add`, `/remove` | anyone in ticket | share a ticket with another user |
 | `/transcript` | anyone in ticket | download the message log |
+| `/claim`, `/unclaim` | staff | take or release a ticket (the AI steps back once claimed) |
+| `/transfer` | staff | hand a ticket to another staff member |
+| `/priority` | staff | low, medium, high or urgent |
 
 ## Run
 

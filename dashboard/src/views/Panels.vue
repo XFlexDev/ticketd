@@ -144,7 +144,7 @@ function optionMeta(o) {
         <h2 class="h2">{{ edit.id ? 'Edit panel' : 'New panel' }}</h2>
         <v-btn variant="text" @click="close">Back</v-btn>
       </div>
-      <v-text-field v-model="edit.name" label="Name" hint="For you and /panel name:..." persistent-hint class="field-block" />
+      <v-text-field v-model="edit.name" label="Name" hint="Only you see it. Used by /panel name" persistent-hint class="field-block" />
       <v-text-field v-model="edit.title" label="Title" counter="256" class="field-block" />
       <v-textarea v-model="edit.description" label="Message" auto-grow rows="3" counter="4000" class="field-block" />
       <div class="two-col">

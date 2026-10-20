@@ -106,3 +106,4 @@ html,body{background:rgb(var(--v-theme-background))}
 @media (max-width:959px){.panel-editor{grid-template-columns:1fr}.discord-preview{position:static;order:-1}.kpis{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:600px){.two-col,.builtin-list{grid-template-columns:1fr}.slider-row{grid-template-columns:1fr;gap:0}.kpis{grid-template-columns:repeat(2,1fr)}.staff-row{grid-template-columns:1fr 60px 60px}}
 @media (prefers-reduced-motion:reduce){.bar span,.chev,.rating-track span{animation:none;transition:none}}
+.bar span.zero{opacity:.18}

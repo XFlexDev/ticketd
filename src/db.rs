@@ -227,8 +227,8 @@ impl Kdb {
         Ok(())
     }
 
-    pub async fn count_tickets(&self) -> Result<i64> {
-        let rows = self.rows("SELECT COUNT(*) FROM tickets", &[]).await?;
+    pub async fn count_tickets(&self, guild_id: u64) -> Result<i64> {
+        let rows = self.rows("SELECT COUNT(*) FROM tickets WHERE guild_id = ?", &[json!(guild_id)]).await?;
         Ok(rows.first().and_then(|r| r[0].as_i64()).unwrap_or(0))
     }
 
@@ -242,10 +242,20 @@ impl Kdb {
     }
 
     /// (role, content) pairs for the AI; bot replies are `assistant`.
+    /// A human staff member (not the bot) has written in this ticket.
+    pub async fn staff_replied(&self, ticket_id: i64, bot_id: u64) -> Result<bool> {
+        let rows = self
+            .rows(
+                "SELECT 1 FROM messages WHERE ticket_id = ? AND is_staff = 1 AND author_id != ? LIMIT 1",
+                &[json!(ticket_id), json!(bot_id)],
+            )
+            .await?;
+        Ok(!rows.is_empty())
+    }
     pub async fn history(&self, ticket_id: i64, limit: i64) -> Result<Vec<(String, String)>> {
         let rows = self
             .rows(
-                "SELECT content, is_staff FROM (SELECT content, is_staff FROM messages WHERE ticket_id = ? ORDER BY id DESC LIMIT ?) ORDER BY rowid",
+                "SELECT content, is_staff FROM (SELECT id, content, is_staff FROM messages WHERE ticket_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id",
                 &[json!(ticket_id), json!(limit)],
             )
             .await?;

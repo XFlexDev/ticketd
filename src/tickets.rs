@@ -69,6 +69,18 @@ async fn ensure_category(ctx: &serenity::Context, data: &Data, guild: serenity::
     Ok(id)
 }
 
+/// The user's open ticket, unless its channel was deleted by hand (then it's closed in the DB).
+async fn live_open_ticket(ctx: &serenity::Context, data: &Data, guild: serenity::GuildId, user: serenity::UserId) -> Result<Option<crate::db::Ticket>> {
+    let Some(t) = data.db.open_ticket_for_user(guild.get(), user.get()).await? else { return Ok(None) };
+    match serenity::ChannelId::new(t.channel_id as u64).to_channel(&ctx.http).await {
+        Err(e) if e.to_string().contains("Unknown Channel") => {
+            data.db.close_ticket(t.id).await?;
+            Ok(None)
+        }
+        _ => Ok(Some(t)),
+    }
+}
+
 async fn create_ticket_channel(
     ctx: &serenity::Context,
     data: &Data,
@@ -110,12 +122,15 @@ async fn create_ticket_channel(
         kind: serenity::PermissionOverwriteType::Member(user.id),
     };
     let bot_allow = serenity::PermissionOverwrite {
-        allow: serenity::Permissions::VIEW_CHANNEL | serenity::Permissions::SEND_MESSAGES,
+        allow: serenity::Permissions::VIEW_CHANNEL
+            | serenity::Permissions::SEND_MESSAGES
+            | serenity::Permissions::EMBED_LINKS
+            | serenity::Permissions::READ_MESSAGE_HISTORY,
         deny: serenity::Permissions::empty(),
         kind: serenity::PermissionOverwriteType::Member(ctx.cache.current_user().id),
     };
 
-    let n = data.db.count_tickets().await?;
+    let n = data.db.count_tickets(guild.get()).await?;
     let name = format!(
         "{}-{:04}-{}",
         data.cfg.ticket_prefix,
@@ -248,7 +263,7 @@ pub async fn ticket_open(
         }
     };
     let subject = subject.unwrap_or_else(|| "support".into());
-    if let Some(t) = ctx.data().db.open_ticket_for_user(guild.get(), ctx.author().id.get()).await? {
+    if let Some(t) = live_open_ticket(ctx.serenity_context(), ctx.data(), guild, ctx.author().id).await? {
         ctx.say(format!("You already have an open ticket: <#{}>", t.channel_id)).await?;
         return Ok(());
     }
@@ -368,7 +383,7 @@ async fn open_from_button(ctx: &serenity::Context, data: &Data, component: &sere
     let member = component.member.clone().ok_or_else(|| anyhow::anyhow!("tickets only work inside a server"))?;
     let guild = component.guild_id.ok_or_else(|| anyhow::anyhow!("tickets only work inside a server"))?;
     let s = settings(data, guild).await?;
-    if let Some(t) = data.db.open_ticket_for_user(guild.get(), member.user.id.get()).await? {
+    if let Some(t) = live_open_ticket(ctx, data, guild, member.user.id).await? {
         return Ok(format!("You already have an open ticket: <#{}>", t.channel_id));
     }
     let (id, ch) = create_ticket_channel(ctx, data, guild, &s, &member.user, "support").await?;
@@ -431,10 +446,11 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
                 &transcript,
             )
             .await
-            .unwrap_or_else(|_| "(summary unavailable)".into())
+            .ok()
     } else {
-        "(AI disabled)".into()
+        None
     };
+    let closed_by = format!("Closed by {}", by.mention());
 
     channel_id
         .send_message(
@@ -442,7 +458,10 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
             serenity::CreateMessage::new().embed(
                 serenity::CreateEmbed::new()
                     .title("Ticket closed")
-                    .description(&summary)
+                    .description(match &summary {
+                        Some(sum) => format!("{closed_by}\n\n{sum}\n\nThis channel will be deleted in 5 seconds."),
+                        None => format!("{closed_by}\n\nThis channel will be deleted in 5 seconds."),
+                    })
                     .colour(0xED4245),
             ),
         )
@@ -453,10 +472,17 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
             .send_message(
                 &ctx.http,
                 serenity::CreateMessage::new()
-                    .content(format!("Ticket #{} closed by {} — subject: {}", t.id, by.name, t.subject))
+                    .content(format!(
+                        "Ticket #{} closed by {}, subject: {}{}",
+                        t.id,
+                        by.name,
+                        t.subject,
+                        summary.as_ref().map(|s| format!("\n{s}")).unwrap_or_default()
+                    ))
                     .add_file(serenity::CreateAttachment::bytes(transcript.into_bytes(), format!("ticket-{}.txt", t.id))),
             )
-            .await?;
+            .await
+            .ok();
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -466,7 +492,7 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
 
 /// Auto-reply with AI in ticket channels.
 pub async fn on_message(ctx: &serenity::Context, msg: &serenity::Message, data: &Data) -> Result<()> {
-    if msg.author.bot || !data.cfg.ai_enabled {
+    if msg.author.bot {
         return Ok(());
     }
     let Some(t) = data.db.by_channel(msg.channel_id.get()).await? else {
@@ -477,16 +503,14 @@ pub async fn on_message(ctx: &serenity::Context, msg: &serenity::Message, data: 
     }
     let Some(guild_id) = msg.guild_id else { return Ok(()) };
     let Ok(s) = settings(data, guild_id).await else { return Ok(()) };
-    if !s.ai_enabled {
-        return Ok(());
-    }
 
     let member = msg.member.as_ref();
     let staff = member.is_some_and(|m| is_staff(&ctx.cache, guild_id, msg.author.id, &m.roles, &s));
     data.db.log_message(t.id, &msg.author.name, msg.author.id.get(), &msg.content, staff).await?;
 
-    // Only auto-reply to the ticket opener / non-staff; staff messages stay silent.
-    if staff {
+    // AI only answers non-staff, and steps back once a human staff member has joined the ticket.
+    let bot_id = ctx.cache.current_user().id.get();
+    if staff || !s.ai_enabled || !data.cfg.ai_enabled || data.db.staff_replied(t.id, bot_id).await.unwrap_or(false) {
         return Ok(());
     }
 

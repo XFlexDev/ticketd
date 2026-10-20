@@ -1140,6 +1140,7 @@ fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
         "leveling" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::leveling::LevelConfig>(c).ok()).unwrap_or_default()).ok()?,
         "alerts" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::alerts::AlertsConfig>(c).ok()).unwrap_or_default()).ok()?,
         "commands" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::custom::CustomConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "utility" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::extras::UtilityConfig>(c).ok()).unwrap_or_default()).ok()?,
         "music" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::music::MusicConfig>(c).ok()).unwrap_or_default()).ok()?,
         _ => return None,
     })
@@ -1187,6 +1188,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         "commands" => serde_json::from_value::<crate::custom::CustomConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "utility" => serde_json::from_value::<crate::extras::UtilityConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
         "music" => serde_json::from_value::<crate::music::MusicConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
@@ -1210,6 +1214,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
     }
     if name == "music" {
         crate::music::forget(guild_id);
+    }
+    if name == "utility" {
+        crate::extras::forget(guild_id);
     }
     if name == "commands" {
         crate::custom::forget(guild_id);

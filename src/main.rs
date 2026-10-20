@@ -4,6 +4,7 @@ mod archive;
 mod ai;
 mod automod;
 mod custom;
+mod extras;
 mod db;
 mod gc;
 mod giveaways;
@@ -89,7 +90,8 @@ async fn main() -> Result<()> {
         | serenity::GatewayIntents::GUILD_MESSAGES
         | serenity::GatewayIntents::MESSAGE_CONTENT
         | serenity::GatewayIntents::GUILD_MODERATION
-        | serenity::GatewayIntents::GUILD_VOICE_STATES;
+        | serenity::GatewayIntents::GUILD_VOICE_STATES
+        | serenity::GatewayIntents::GUILD_MESSAGE_REACTIONS;
     // Server Members is privileged: if it isn't enabled in the dev portal, run without it.
     for intents in [base | serenity::GatewayIntents::GUILD_MEMBERS, base] {
         let framework = build_framework(db.clone(), cfg.clone(), ai.clone());
@@ -147,6 +149,14 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
             music::stop(),
             music::queue(),
             music::volume(),
+            extras::userinfo(),
+            extras::serverinfo(),
+            extras::avatar(),
+            extras::banner(),
+            extras::roleinfo(),
+            extras::afk(),
+            extras::sticky(),
+            extras::suggest(),
         ]),
         on_error: |err| Box::pin(on_error(err)),
         event_handler: |fctx, event| {
@@ -161,6 +171,7 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                     if !automod::on_message(ctx, new_message, data).await {
                         leveling::on_message(ctx, new_message, data).await;
                         custom::on_message(ctx, new_message, data).await;
+                        extras::on_message(ctx, new_message, data).await;
                         tickets::on_message(ctx, new_message, data).await?;
                     }
                 }
@@ -171,6 +182,12 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                 }
                 if let serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } = event {
                     welcome::on_leave(ctx, data, *guild_id, user).await?;
+                }
+                if let serenity::FullEvent::ReactionAdd { add_reaction } = event {
+                    extras::on_reaction(ctx, data, add_reaction).await;
+                }
+                if let serenity::FullEvent::ReactionRemove { removed_reaction } = event {
+                    extras::on_reaction(ctx, data, removed_reaction).await;
                 }
                 if let serenity::FullEvent::VoiceStateUpdate { old, new } = event {
                     music::on_voice(ctx, data, old.as_ref(), new).await;
@@ -207,6 +224,7 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
                 tokio::spawn(utility::sweeper(ctx.clone(), data.clone()));
                 tokio::spawn(alerts::poller(ctx.clone(), data.clone()));
                 tokio::spawn(music::startup(ctx.clone(), data.clone()));
+                tokio::spawn(extras::startup(data.clone()));
                 tokio::spawn(automod::scam_refresher());
                 if let Some(store) = data.store.clone() {
                     tokio::spawn(gc::sweeper(data.db.clone(), store));

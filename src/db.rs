@@ -163,6 +163,10 @@ impl Kdb {
         )
         .await?;
         self.exec("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at)", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS afk (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, reason TEXT NOT NULL, since INTEGER NOT NULL, PRIMARY KEY (guild_id, user_id))", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS sticky (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, text TEXT NOT NULL, last_id INTEGER NOT NULL DEFAULT 0)", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS starboard (message_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, board_id INTEGER NOT NULL)", &[]).await?;
+        self.exec("CREATE TABLE IF NOT EXISTS suggestion_votes (message_id INTEGER NOT NULL, user_id INTEGER NOT NULL, vote INTEGER NOT NULL, PRIMARY KEY (message_id, user_id))", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS lobbies (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL)", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS alert_seen (guild_id INTEGER NOT NULL, feed TEXT NOT NULL, seen TEXT NOT NULL, PRIMARY KEY (guild_id, feed))", &[]).await?;
         self.exec("CREATE TABLE IF NOT EXISTS panels (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, config TEXT NOT NULL)", &[]).await?;
@@ -772,6 +776,62 @@ impl Kdb {
     pub async fn deactivate_case(&self, guild_id: u64, num: i64) -> Result<()> {
         self.exec("UPDATE cases SET active = 0 WHERE guild_id = ? AND num = ?", &[json!(guild_id), json!(num)]).await?;
         Ok(())
+    }
+
+    pub async fn set_afk(&self, guild_id: u64, user_id: u64, reason: &str, since: i64) -> Result<()> {
+        self.exec("INSERT OR REPLACE INTO afk (guild_id, user_id, reason, since) VALUES (?,?,?,?)", &[json!(guild_id), json!(user_id), json!(reason), json!(since)]).await?;
+        Ok(())
+    }
+
+    pub async fn clear_afk(&self, guild_id: u64, user_id: u64) -> Result<()> {
+        self.exec("DELETE FROM afk WHERE guild_id = ? AND user_id = ?", &[json!(guild_id), json!(user_id)]).await?;
+        Ok(())
+    }
+
+    pub async fn afks(&self) -> Result<Vec<(u64, u64, String, i64)>> {
+        let rows = self.rows("SELECT guild_id, user_id, reason, since FROM afk", &[]).await?;
+        Ok(rows.iter().filter_map(|r| Some((r[0].as_i64()? as u64, r[1].as_i64()? as u64, r[2].as_str()?.to_string(), r[3].as_i64()?))).collect())
+    }
+
+    pub async fn set_sticky(&self, channel_id: u64, guild_id: u64, text: &str, last_id: u64) -> Result<()> {
+        self.exec("INSERT OR REPLACE INTO sticky (channel_id, guild_id, text, last_id) VALUES (?,?,?,?)", &[json!(channel_id), json!(guild_id), json!(text), json!(last_id)]).await?;
+        Ok(())
+    }
+
+    pub async fn clear_sticky(&self, channel_id: u64) -> Result<()> {
+        self.exec("DELETE FROM sticky WHERE channel_id = ?", &[json!(channel_id)]).await?;
+        Ok(())
+    }
+
+    pub async fn stickies(&self) -> Result<Vec<(u64, u64, String, u64)>> {
+        let rows = self.rows("SELECT channel_id, guild_id, text, last_id FROM sticky", &[]).await?;
+        Ok(rows.iter().filter_map(|r| Some((r[0].as_i64()? as u64, r[1].as_i64()? as u64, r[2].as_str()?.to_string(), r[3].as_i64().unwrap_or(0) as u64))).collect())
+    }
+
+    pub async fn star_entry(&self, message_id: u64) -> Result<Option<u64>> {
+        let rows = self.rows("SELECT board_id FROM starboard WHERE message_id = ?", &[json!(message_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_i64()).map(|v| v as u64))
+    }
+
+    pub async fn set_star_entry(&self, message_id: u64, guild_id: u64, board_id: u64) -> Result<()> {
+        self.exec("INSERT OR REPLACE INTO starboard (message_id, guild_id, board_id) VALUES (?,?,?)", &[json!(message_id), json!(guild_id), json!(board_id)]).await?;
+        Ok(())
+    }
+
+    /// Same vote again removes it.
+    pub async fn vote_suggestion(&self, message_id: u64, user_id: u64, vote: i64) -> Result<()> {
+        let rows = self.rows("SELECT vote FROM suggestion_votes WHERE message_id = ? AND user_id = ?", &[json!(message_id), json!(user_id)]).await?;
+        if rows.first().and_then(|r| r[0].as_i64()) == Some(vote) {
+            self.exec("DELETE FROM suggestion_votes WHERE message_id = ? AND user_id = ?", &[json!(message_id), json!(user_id)]).await?;
+        } else {
+            self.exec("INSERT OR REPLACE INTO suggestion_votes (message_id, user_id, vote) VALUES (?,?,?)", &[json!(message_id), json!(user_id), json!(vote)]).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn suggestion_counts(&self, message_id: u64) -> Result<(i64, i64)> {
+        let rows = self.rows("SELECT COALESCE(SUM(vote = 1), 0), COALESCE(SUM(vote = -1), 0) FROM suggestion_votes WHERE message_id = ?", &[json!(message_id)]).await?;
+        Ok(rows.first().map(|r| (r[0].as_i64().unwrap_or(0), r[1].as_i64().unwrap_or(0))).unwrap_or((0, 0)))
     }
 
     pub async fn add_lobby(&self, channel_id: u64, guild_id: u64, owner_id: u64) -> Result<()> {

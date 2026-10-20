@@ -8,7 +8,7 @@ anyhow = "1.0.104"
 axum = "0.8.9"
 dotenvy = "0.15.7"
 futures = "0.3"
-image = { version = "0.25", default-features = false, features = ["png", "webp", "bmp", "tiff"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "bmp", "tiff", "jpeg", "gif"] }
 sha2 = "0.10"
 zstd = "0.13"
 poise = "0.7.1"

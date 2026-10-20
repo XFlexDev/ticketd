@@ -97,6 +97,25 @@ pub struct AgentConfig {
     /// Max tool-calling rounds per reply.
     #[serde(default = "d_steps")]
     pub max_steps: i64,
+    /// Look of the first message in a new ticket.
+    #[serde(default)]
+    pub welcome: Welcome,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Welcome {
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub image: String,
+    #[serde(default)]
+    pub thumbnail: String,
+    #[serde(default)]
+    pub footer: String,
+    #[serde(default)]
+    pub footer_icon: String,
 }
 
 fn yes() -> bool {
@@ -131,6 +150,7 @@ impl Default for AgentConfig {
             greeting: String::new(),
             reply_delay: 0,
             max_steps: d_steps(),
+            welcome: Welcome::default(),
         }
     }
 }
@@ -159,6 +179,18 @@ impl AgentConfig {
         self.greeting = self.greeting.trim().chars().take(1500).collect();
         self.reply_delay = self.reply_delay.clamp(0, 30);
         self.max_steps = self.max_steps.clamp(1, 10);
+        let w = &mut self.welcome;
+        w.title = w.title.trim().chars().take(256).collect();
+        w.footer = w.footer.trim().chars().take(2048).collect();
+        if crate::panels::parse_color(&w.color).is_none() {
+            w.color = String::new();
+        }
+        for (label, url) in [("Welcome image", &mut w.image), ("Welcome thumbnail", &mut w.thumbnail), ("Welcome footer icon", &mut w.footer_icon)] {
+            *url = url.trim().into();
+            if !url.is_empty() && !url.starts_with("https://") {
+                return Err(format!("{label} must be an https:// link"));
+            }
+        }
         if self.skills.len() > 25 || self.webhooks.len() > 15 || self.mcp.len() > 5 {
             return Err("Limits: 25 skills, 15 webhooks, 5 MCP servers".into());
         }

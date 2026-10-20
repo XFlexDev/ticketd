@@ -53,6 +53,16 @@ pub struct Panel {
     #[serde(default)]
     pub image: String,
     #[serde(default)]
+    pub thumbnail: String,
+    #[serde(default)]
+    pub author_name: String,
+    #[serde(default)]
+    pub author_icon: String,
+    #[serde(default)]
+    pub footer: String,
+    #[serde(default)]
+    pub footer_icon: String,
+    #[serde(default)]
     pub style: String,
     #[serde(default)]
     pub placeholder: String,
@@ -69,6 +79,11 @@ impl Default for Panel {
             description: "Need help? Open a ticket and we'll get to you.".into(),
             color: "#5865F2".into(),
             image: String::new(),
+            thumbnail: String::new(),
+            author_name: String::new(),
+            author_icon: String::new(),
+            footer: String::new(),
+            footer_icon: String::new(),
             style: "buttons".into(),
             placeholder: String::new(),
             options: vec![PanelOption { id: "default".into(), label: "Open a ticket".into(), color: "primary".into(), ..Default::default() }],
@@ -107,9 +122,18 @@ impl Panel {
         self.title = clip(&self.title, 256);
         self.description = clip(&self.description, 4000);
         self.placeholder = clip(&self.placeholder, 150);
-        self.image = self.image.trim().into();
-        if !self.image.is_empty() && !self.image.starts_with("https://") {
-            return Err("Image must be an https:// link".into());
+        self.author_name = clip(&self.author_name, 256);
+        self.footer = clip(&self.footer, 2048);
+        for (label, url) in [
+            ("Image", &mut self.image),
+            ("Thumbnail", &mut self.thumbnail),
+            ("Author icon", &mut self.author_icon),
+            ("Footer icon", &mut self.footer_icon),
+        ] {
+            *url = url.trim().into();
+            if !url.is_empty() && !url.starts_with("https://") {
+                return Err(format!("{label} must be an https:// link"));
+            }
         }
         if parse_color(&self.color).is_none() {
             self.color = "#5865F2".into();
@@ -165,9 +189,7 @@ impl Panel {
         if !self.description.is_empty() {
             embed = embed.description(&self.description);
         }
-        if !self.image.is_empty() {
-            embed = embed.image(&self.image);
-        }
+        embed = media(embed, &self.image, &self.thumbnail, &self.author_name, &self.author_icon, &self.footer, &self.footer_icon);
         let rows = if self.style == "select" {
             let options = self
                 .options
@@ -212,6 +234,39 @@ impl Panel {
         };
         (embed, rows)
     }
+}
+
+/// Image, thumbnail, author line and footer; empty values are skipped.
+pub fn media(
+    mut e: serenity::CreateEmbed,
+    image: &str,
+    thumbnail: &str,
+    author: &str,
+    author_icon: &str,
+    footer: &str,
+    footer_icon: &str,
+) -> serenity::CreateEmbed {
+    if !image.is_empty() {
+        e = e.image(image);
+    }
+    if !thumbnail.is_empty() {
+        e = e.thumbnail(thumbnail);
+    }
+    if !author.is_empty() {
+        let mut a = serenity::CreateEmbedAuthor::new(author);
+        if !author_icon.is_empty() {
+            a = a.icon_url(author_icon);
+        }
+        e = e.author(a);
+    }
+    if !footer.is_empty() {
+        let mut f = serenity::CreateEmbedFooter::new(footer);
+        if !footer_icon.is_empty() {
+            f = f.icon_url(footer_icon);
+        }
+        e = e.footer(f);
+    }
+    e
 }
 
 pub fn parse_color(s: &str) -> Option<u32> {

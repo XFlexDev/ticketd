@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { useDisplay } from 'vuetify'
 import { mdiPlus, mdiClose, mdiChevronRight, mdiSend } from '@mdi/js'
 import { api } from '../api'
+import ImageField from '../components/ImageField.vue'
 
 const props = defineProps({ guildId: { type: String, required: true } })
 const emit = defineEmits(['toast'])
@@ -37,7 +38,7 @@ const templates = [
 onMounted(async () => {
   try {
     const r = await api(`/api/guilds/${props.guildId}/agent`)
-    cfg.value = r.config
+    cfg.value = { ...r.config, welcome: { color: '', title: '', image: '', thumbnail: '', footer: '', footer_icon: '', ...(r.config.welcome || {}) } }
     saved.value = JSON.stringify(cfg.value)
   } catch (e) { error.value = e.message }
 })
@@ -220,6 +221,17 @@ async function send() {
           <div class="slider-row">
             <div><h3>Reply delay</h3><p class="muted small">{{ cfg.reply_delay ? `Waits ${cfg.reply_delay}s so members can finish typing` : 'Answers right away' }}</p></div>
             <v-slider v-model="cfg.reply_delay" :min="0" :max="30" :step="1" hide-details color="primary" />
+          </div>
+          <h3 style="margin-top:12px">Welcome message look</h3>
+          <div class="media-grid">
+            <v-text-field v-model="cfg.welcome.title" label="Title" placeholder="{type} ticket" hide-details density="comfortable" />
+            <v-text-field v-model="cfg.welcome.color" label="Color" placeholder="#5865F2" hide-details density="comfortable">
+              <template #prepend-inner><input :value="cfg.welcome.color || '#5865F2'" type="color" class="color-dot" aria-label="Pick color" @input="e => (cfg.welcome.color = e.target.value)"></template>
+            </v-text-field>
+            <ImageField v-model="cfg.welcome.image" label="Big image" :guild-id="guildId" @error="e => emit('toast', e)" />
+            <ImageField v-model="cfg.welcome.thumbnail" label="Thumbnail" :guild-id="guildId" @error="e => emit('toast', e)" />
+            <v-text-field v-model="cfg.welcome.footer" label="Footer" hide-details density="comfortable" />
+            <ImageField v-model="cfg.welcome.footer_icon" label="Footer icon" :guild-id="guildId" @error="e => emit('toast', e)" />
           </div>
           <v-textarea v-model="cfg.greeting" label="Fixed greeting (optional)" auto-grow rows="2" counter="1500" placeholder="Hey {user}! Thanks for opening a {type} ticket. What's going on?" hint="{user} mentions the member, {type} is the ticket type. Empty = the AI writes one" persistent-hint class="field-block" />
         </div>

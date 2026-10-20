@@ -328,7 +328,12 @@ async fn greet_ticket(
     if !form.is_empty() {
         msg = msg.embed(serenity::CreateEmbed::new().title(&spec.subject).description(form.chars().take(4000).collect::<String>()).colour(0x2B2D31));
     }
-    msg = msg.embed(serenity::CreateEmbed::new().description(&text).colour(0x5865F2));
+    let w = &cfg.welcome;
+    let mut welcome = serenity::CreateEmbed::new().description(&text).colour(crate::panels::parse_color(&w.color).unwrap_or(0x5865F2));
+    if !w.title.is_empty() {
+        welcome = welcome.title(w.title.replace("{type}", &spec.subject));
+    }
+    msg = msg.embed(crate::panels::media(welcome, &w.image, &w.thumbnail, "", "", &w.footer, &w.footer_icon));
     channel_id.send_message(&ctx.http, msg).await?;
     data.db.log_message(ticket_id, "Kev", bot_id, &text, true).await?;
     Ok(())

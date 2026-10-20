@@ -132,6 +132,8 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/panels/{panel_id}", put(save_panel_id).delete(delete_panel))
         .route("/api/guilds/{guild_id}/panels/{panel_id}/send", post(send_panel))
         .route("/api/guilds/{guild_id}/stats", get(stats))
+        .route("/api/guilds/{guild_id}/media", post(upload_media).layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)))
+        .route("/media/{file}", get(media))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
         .with_state(web))
 }
@@ -491,6 +493,101 @@ async fn ticket_file(State(w): State<Web>, headers: HeaderMap, Path((ticket_id, 
             (header::CONTENT_TYPE, ctype),
             (header::CACHE_CONTROL, "private, max-age=86400".into()),
             (header::HeaderName::from_static("x-content-type-options"), "nosniff".into()),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Dashboard image upload for embeds. PNG/BMP/TIFF become lossless WebP; JPEG/GIF/WebP stay as they are.
+async fn upload_media(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, body: axum::body::Bytes) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some(store) = w.data.store.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Uploads are off right now").into_response();
+    };
+    let bytes = body.to_vec();
+    if bytes.len() > 8 * 1024 * 1024 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "Images can be up to 8 MB").into_response();
+    }
+    let Ok(format) = image::guess_format(&bytes) else {
+        return (StatusCode::BAD_REQUEST, "That isn't an image (PNG, JPEG, GIF or WebP)").into_response();
+    };
+    let (mime, ext) = match format {
+        image::ImageFormat::Png => ("image/png", "png"),
+        image::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
+        image::ImageFormat::Gif => ("image/gif", "gif"),
+        image::ImageFormat::WebP => ("image/webp", "webp"),
+        image::ImageFormat::Bmp => ("image/bmp", "bmp"),
+        image::ImageFormat::Tiff => ("image/tiff", "tiff"),
+        _ => return (StatusCode::BAD_REQUEST, "Use PNG, JPEG, GIF or WebP").into_response(),
+    };
+    let hash = crate::archive::sha256(&bytes);
+    let existing = w.data.db.file(&hash).await.ok().flatten().filter(|(k, _, _)| k.starts_with("media/"));
+    let out_ext = match existing {
+        Some((key, _, _)) => key.rsplit('.').next().unwrap_or(ext).to_string(),
+        None => {
+            let orig = bytes.len();
+            let (packed, enc) = match tokio::task::spawn_blocking(move || {
+                let (p, e) = crate::archive::compress(&bytes, &format!("x.{ext}"), mime);
+                // embeds must stay directly loadable: only lossless WebP or the original bytes
+                if e == crate::archive::Enc::Zstd { (bytes, crate::archive::Enc::Raw) } else { (p, e) }
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            };
+            let (out_ext, out_mime) = if enc == crate::archive::Enc::Webp { ("webp", "image/webp") } else { (ext, mime) };
+            let key = format!("media/{hash}.{out_ext}");
+            let stored = packed.len();
+            if let Err(e) = store.put(&key, packed).await {
+                return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+            }
+            if let Err(e) = w.data.db.add_file(&hash, &key, "raw", out_mime, orig, stored).await {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+            out_ext.to_string()
+        }
+    };
+    Json(json!({"url": format!("{}/media/{hash}.{out_ext}", w.base_url)})).into_response()
+}
+
+/// Public, immutable embed images (content-addressed), cached in memory and at Cloudflare.
+async fn media(State(w): State<Web>, Path(file): Path<String>) -> Response {
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (String, axum::body::Bytes)>>> =
+        std::sync::LazyLock::new(Default::default);
+    let Some((hash, _)) = file.split_once('.') else { return StatusCode::NOT_FOUND.into_response() };
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let cached = CACHE.lock().unwrap().get(hash).cloned();
+    let (mime, bytes) = match cached {
+        Some(v) => v,
+        None => {
+            let (Some(store), Ok(Some((key, _, mime)))) = (w.data.store.clone(), w.data.db.file(hash).await) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            if !key.starts_with("media/") {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            let Ok(b) = store.get(&key).await else { return StatusCode::BAD_GATEWAY.into_response() };
+            let v = (mime, axum::body::Bytes::from(b));
+            let mut c = CACHE.lock().unwrap();
+            if c.values().map(|(_, b)| b.len()).sum::<usize>() > 64 * 1024 * 1024 {
+                c.clear();
+            }
+            c.insert(hash.to_string(), v.clone());
+            v
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
+            (header::HeaderName::from_static("x-content-type-options"), "nosniff".to_string()),
         ],
         bytes,
     )

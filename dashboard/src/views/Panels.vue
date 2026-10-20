@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useDisplay } from 'vuetify'
 import { mdiPlus, mdiClose, mdiChevronRight, mdiArrowUp, mdiArrowDown } from '@mdi/js'
 import { api } from '../api'
+import ImageField from '../components/ImageField.vue'
 
 const props = defineProps({ guildId: { type: String, required: true }, guild: { type: Object, default: null } })
 const emit = defineEmits(['toast'])
@@ -154,7 +155,15 @@ function optionMeta(o) {
         <v-select v-model="edit.style" :items="[{ title: 'Buttons', value: 'buttons' }, { title: 'Dropdown', value: 'select' }]" label="Style" />
       </div>
       <v-text-field v-if="edit.style === 'select'" v-model="edit.placeholder" label="Dropdown text" placeholder="Pick what you need help with" class="field-block" />
-      <v-text-field v-model="edit.image" label="Image URL (optional)" placeholder="https://..." class="field-block" />
+      <div class="section-head" style="margin-top:8px"><h3>Images and text</h3></div>
+      <div class="media-grid">
+        <ImageField v-model="edit.image" label="Big image" :guild-id="guildId" @error="e => emit('toast', e)" />
+        <ImageField v-model="edit.thumbnail" label="Thumbnail" :guild-id="guildId" @error="e => emit('toast', e)" />
+        <v-text-field v-model="edit.author_name" label="Author line" placeholder="Kreatix Support" hide-details density="comfortable" />
+        <ImageField v-model="edit.author_icon" label="Author icon" :guild-id="guildId" @error="e => emit('toast', e)" />
+        <v-text-field v-model="edit.footer" label="Footer" placeholder="We usually answer within an hour" hide-details density="comfortable" />
+        <ImageField v-model="edit.footer_icon" label="Footer icon" :guild-id="guildId" @error="e => emit('toast', e)" />
+      </div>
 
       <div class="section-head" style="margin-top:8px">
         <div><h3>Ticket types</h3><p class="muted small">Up to 25. Click one to set its category, roles, questions and AI instructions.</p></div>
@@ -190,10 +199,13 @@ function optionMeta(o) {
     <aside class="discord-preview" aria-label="Preview">
       <p class="muted small">Preview</p>
       <div class="dc-msg">
-        <div class="dc-embed" :style="{ borderColor: edit.color }">
+        <div class="dc-embed" :class="{ 'has-thumb': edit.thumbnail }" :style="{ borderColor: edit.color }">
+          <img v-if="edit.thumbnail" :src="edit.thumbnail" alt="" class="dc-thumb">
+          <span v-if="edit.author_name" class="dc-author"><img v-if="edit.author_icon" :src="edit.author_icon" alt="">{{ edit.author_name }}</span>
           <strong v-if="edit.title">{{ edit.title }}</strong>
           <p v-if="edit.description">{{ edit.description }}</p>
-          <img v-if="edit.image" :src="edit.image" alt="">
+          <img v-if="edit.image" :src="edit.image" alt="" class="dc-image">
+          <span v-if="edit.footer" class="dc-footer"><img v-if="edit.footer_icon" :src="edit.footer_icon" alt="">{{ edit.footer }}</span>
         </div>
         <div v-if="edit.style === 'select'" class="dc-select">{{ edit.placeholder || 'Pick what you need help with' }}</div>
         <div v-else class="dc-buttons">

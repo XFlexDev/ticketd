@@ -155,6 +155,7 @@ impl Kdb {
                 ("human", "INTEGER NOT NULL DEFAULT 0"),
                 ("closed_by", "INTEGER NOT NULL DEFAULT 0"),
                 ("close_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("archive_key", "TEXT NOT NULL DEFAULT ''"),
             ],
         )
         .await?;
@@ -165,6 +166,11 @@ impl Kdb {
                 ("close_on_leave", "INTEGER NOT NULL DEFAULT 1"),
                 ("ratings", "INTEGER NOT NULL DEFAULT 1"),
             ],
+        )
+        .await?;
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS files (hash TEXT PRIMARY KEY, key TEXT NOT NULL, enc TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, stored INTEGER NOT NULL, created_at INTEGER NOT NULL)",
+            &[],
         )
         .await?;
         self.exec("CREATE INDEX IF NOT EXISTS idx_tickets_guild ON tickets(guild_id, status)", &[]).await?;
@@ -536,6 +542,55 @@ impl Kdb {
                 line
             })
             .collect())
+    }
+
+    /// (key, enc, mime) of an archived blob.
+    pub async fn file(&self, hash: &str) -> Result<Option<(String, String, String)>> {
+        let rows = self.rows("SELECT key, enc, mime FROM files WHERE hash = ?", &[json!(hash)]).await?;
+        Ok(rows.first().map(|r| (r[0].as_str().unwrap_or("").into(), r[1].as_str().unwrap_or("").into(), r[2].as_str().unwrap_or("").into())))
+    }
+
+    pub async fn add_file(&self, hash: &str, key: &str, enc: &str, mime: &str, size: usize, stored: usize) -> Result<()> {
+        self.exec(
+            "INSERT OR IGNORE INTO files (hash, key, enc, mime, size, stored, created_at) VALUES (?,?,?,?,?,?,?)",
+            &[json!(hash), json!(key), json!(enc), json!(mime), json!(size), json!(stored), json!(now())],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn replace_in_message(&self, id: i64, from: &str, to: &str) -> Result<()> {
+        self.exec("UPDATE messages SET content = REPLACE(content, ?, ?) WHERE id = ?", &[json!(from), json!(to), json!(id)]).await?;
+        Ok(())
+    }
+
+    /// The hash is referenced by a message of this ticket (authorizes dashboard downloads).
+    pub async fn ticket_has_file(&self, ticket_id: i64, hash: &str) -> Result<bool> {
+        let rows = self
+            .rows("SELECT 1 FROM messages WHERE ticket_id = ? AND instr(content, ?) > 0 LIMIT 1", &[json!(ticket_id), json!(format!("kst:{hash}"))])
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
+    pub async fn messages_json(&self, ticket_id: i64) -> Result<Vec<Value>> {
+        let rows = self
+            .rows("SELECT author, author_id, content, is_staff, created_at FROM messages WHERE ticket_id = ? ORDER BY id", &[json!(ticket_id)])
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| json!({"author": r[0], "author_id": r[1].as_i64().unwrap_or(0).to_string(), "content": r[2], "kind": r[3], "at": r[4]}))
+            .collect())
+    }
+
+    pub async fn set_archive(&self, ticket_id: i64, key: &str) -> Result<()> {
+        self.exec("UPDATE tickets SET archive_key = ? WHERE id = ?", &[json!(key), json!(ticket_id)]).await?;
+        Ok(())
+    }
+
+    pub async fn storage_stats(&self) -> Result<(i64, i64, i64)> {
+        let rows = self.rows("SELECT COUNT(*), COALESCE(SUM(size),0), COALESCE(SUM(stored),0) FROM files", &[]).await?;
+        let r = rows.first().cloned().unwrap_or_default();
+        Ok((r[0].as_i64().unwrap_or(0), r[1].as_i64().unwrap_or(0), r[2].as_i64().unwrap_or(0)))
     }
 
     pub async fn set_subject(&self, ticket_id: i64, subject: &str) -> Result<()> {

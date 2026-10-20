@@ -2,7 +2,7 @@ use crate::agent::{self, Action, AgentConfig, TicketInfo};
 use crate::db::{Settings, Ticket};
 use crate::panels::{Panel, PanelOption};
 use crate::{Context, Data, Error};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use poise::serenity_prelude as serenity;
 use serenity::Mentionable;
 
@@ -968,9 +968,56 @@ async fn close_current(ctx: &serenity::Context, data: &Data, channel_id: serenit
         ask_rating(ctx, &t).await;
     }
 
+    archive_ticket(data, t.id).await;
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     channel_id.delete(&ctx.http).await.ok();
     Ok(true)
+}
+
+/// Copies a Discord attachment (its links expire) into the archive, losslessly compressed and
+/// deduplicated, then points the logged message at `kst:<hash>`.
+async fn archive_attachment(data: Data, msg_id: i64, url: String, name: String, mime: String, size: u64) {
+    let Some(store) = data.store.clone() else { return };
+    if size > crate::archive::MAX_FILE {
+        return;
+    }
+    let run = async {
+        let bytes = reqwest::get(&url).await?.error_for_status()?.bytes().await?.to_vec();
+        let hash = crate::archive::sha256(&bytes);
+        if data.db.file(&hash).await?.is_none() {
+            let (n, m) = (name.clone(), mime.clone());
+            let orig = bytes.len();
+            let (packed, enc) = tokio::task::spawn_blocking(move || crate::archive::compress(&bytes, &n, &m)).await?;
+            let key = crate::archive::file_key(&hash, enc);
+            let stored = packed.len();
+            store.put(&key, packed).await?;
+            let mime = if mime.is_empty() { "application/octet-stream".to_string() } else { mime.clone() };
+            data.db.add_file(&hash, &key, enc.as_str(), &mime, orig, stored).await?;
+            tracing::info!("archived {name}: {orig} -> {stored} bytes ({})", enc.as_str());
+        }
+        data.db.replace_in_message(msg_id, &url, &format!("kst:{hash}")).await?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = run.await {
+        tracing::warn!("attachment archive failed for {name}: {e:#}");
+    }
+}
+
+/// Full ticket (meta + every message) as zstd JSON in the archive.
+async fn archive_ticket(data: &Data, id: i64) {
+    let Some(store) = data.store.clone() else { return };
+    let run = async {
+        let t = data.db.by_id(id).await?.context("ticket gone")?;
+        let doc = crate::archive::ticket_doc(&t, data.db.messages_json(id).await?);
+        let packed = crate::archive::pack_ticket(&doc)?;
+        let key = crate::archive::ticket_key(t.guild_id, t.id);
+        store.put(&key, packed).await?;
+        data.db.set_archive(id, &key).await?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = run.await {
+        tracing::warn!("ticket {id} archive failed: {e:#}");
+    }
 }
 
 async fn ask_rating(ctx: &serenity::Context, t: &Ticket) {
@@ -1018,6 +1065,16 @@ pub async fn on_message(ctx: &serenity::Context, msg: &serenity::Message, data: 
         content.push_str(&format!("\n[attachment: {} {}]", a.filename, a.url));
     }
     let my_id = data.db.log_message(t.id, &msg.author.name, msg.author.id.get(), &content, staff).await?;
+    for a in &msg.attachments {
+        tokio::spawn(archive_attachment(
+            data.clone(),
+            my_id,
+            a.url.clone(),
+            a.filename.clone(),
+            a.content_type.clone().unwrap_or_default(),
+            a.size as u64,
+        ));
+    }
     data.db.touch(t.id, staff, staff).await.ok();
 
     let bot_id = ctx.cache.current_user().id.get();

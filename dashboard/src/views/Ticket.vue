@@ -10,6 +10,19 @@ const error = ref('')
 onMounted(async () => {
   try { t.value = await api(`/api/tickets/${route.params.id}`) } catch (e) { error.value = e.message }
 })
+const lines = computed(() => (t.value?.transcript || '').split('\n').filter(Boolean).map(line => {
+  const parts = []
+  const re = /\[attachment: (.+?) (kst:([0-9a-f]{64})|https?:\/\/\S+)\]/g
+  let last = 0, m
+  while ((m = re.exec(line))) {
+    if (m.index > last) parts.push({ text: line.slice(last, m.index) })
+    const url = m[3] ? `/api/tickets/${route.params.id}/files/${m[3]}` : m[2]
+    parts.push({ file: m[1], url, image: /\.(png|jpe?g|gif|webp|bmp)$/i.test(m[1]) })
+    last = re.lastIndex
+  }
+  if (last < line.length) parts.push({ text: line.slice(last) })
+  return parts
+}))
 function back() { history.length > 1 ? router.back() : router.push('/') }
 const name = id => (id && t.value?.users?.[id]) || id
 const when = s => s ? new Date(s * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '-'
@@ -47,7 +60,16 @@ const rows = computed(() => {
       <dl class="details ticket-details">
         <template v-for="[k, v] in rows" :key="k"><dt>{{ k }}</dt><dd :class="k === 'Priority' ? ['prio', t.priority || 'none'] : ''">{{ v }}</dd></template>
       </dl>
-      <div class="transcript"><pre>{{ t.transcript || 'Empty transcript' }}</pre></div>
+      <div class="transcript">
+        <p v-if="!lines.length" class="muted">Empty transcript</p>
+        <div v-for="(l, i) in lines" :key="i" class="t-line">
+          <template v-for="(p, j) in l" :key="j">
+            <span v-if="p.text">{{ p.text }}</span>
+            <a v-else-if="p.image" :href="p.url" target="_blank" rel="noopener" class="t-img"><img :src="p.url" :alt="p.file" loading="lazy"></a>
+            <a v-else :href="p.url" target="_blank" rel="noopener" class="t-file">{{ p.file }}</a>
+          </template>
+        </div>
+      </div>
     </template>
   </div>
 </template>

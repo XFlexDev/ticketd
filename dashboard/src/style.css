@@ -107,3 +107,6 @@ html,body{background:rgb(var(--v-theme-background))}
 @media (max-width:600px){.two-col,.builtin-list{grid-template-columns:1fr}.slider-row{grid-template-columns:1fr;gap:0}.kpis{grid-template-columns:repeat(2,1fr)}.staff-row{grid-template-columns:1fr 60px 60px}}
 @media (prefers-reduced-motion:reduce){.bar span,.chev,.rating-track span{animation:none;transition:none}}
 .bar span.zero{opacity:.18}
+.t-line{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.t-img{display:block;margin:6px 0}.t-img img{max-width:min(100%,420px);max-height:320px;border-radius:4px;display:block}
+.t-file{display:inline-block;padding:0 6px;border-radius:3px;background:rgba(var(--v-theme-on-surface),.08);text-decoration:none}

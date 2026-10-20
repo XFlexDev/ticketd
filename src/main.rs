@@ -1,4 +1,5 @@
 mod agent;
+mod archive;
 mod ai;
 mod db;
 mod panels;
@@ -18,6 +19,7 @@ pub struct Data {
     pub db: db::Kdb,
     pub cfg: Arc<Config>,
     pub ai: Arc<ai::Client>,
+    pub store: Option<Arc<archive::Store>>,
 }
 
 pub type Error = anyhow::Error;
@@ -96,7 +98,11 @@ async fn main() -> Result<()> {
                         info!("registered commands globally");
                     }
                 }
-                let data = Data { db, cfg, ai };
+                let store = archive::Store::from_env().map(Arc::new);
+                if store.is_none() {
+                    tracing::warn!("KST_* not set: ticket archive disabled");
+                }
+                let data = Data { db, cfg, ai, store };
                 tokio::spawn(tickets::sweeper(ctx.clone(), data.clone()));
                 if let Some(tx) = WEB_TX.lock().unwrap().take() {
                     let _ = tx.send(std::sync::Arc::new(data.clone()));

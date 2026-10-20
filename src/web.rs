@@ -127,6 +127,7 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/guilds/{guild_id}/agent/mcp-test", post(test_mcp))
         .route("/api/tickets/{ticket_id}/transcript", get(transcript))
         .route("/api/tickets/{ticket_id}", get(ticket_detail))
+        .route("/api/tickets/{ticket_id}/files/{hash}", get(ticket_file))
         .route("/api/guilds/{guild_id}/panels", get(list_panels).post(save_panel))
         .route("/api/guilds/{guild_id}/panels/{panel_id}", put(save_panel_id).delete(delete_panel))
         .route("/api/guilds/{guild_id}/panels/{panel_id}/send", post(send_panel))
@@ -451,11 +452,49 @@ async fn ticket_detail(State(w): State<Web>, headers: HeaderMap, Path(ticket_id)
             let ids: Vec<String> = [t.user_id, t.claimed_by, t.closed_by].iter().filter(|x| **x != 0).map(|x| x.to_string()).collect();
             v["users"] = json!(w.user_names(&ids).await);
             v["transcript"] = json!(w.data.db.transcript(ticket_id).await.unwrap_or_default());
+            v["archived"] = json!(w.data.store.is_some());
             Json(v).into_response()
         }
         Ok(Some(_)) => StatusCode::FORBIDDEN.into_response(),
         _ => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// Streams an archived attachment back in its original form (zstd is undone, lossless WebP is served as is).
+async fn ticket_file(State(w): State<Web>, headers: HeaderMap, Path((ticket_id, hash)): Path<(i64, String)>) -> Response {
+    let Some((_, _, guilds)) = w.session(&headers).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match w.data.db.by_id(ticket_id).await {
+        Ok(Some(t)) if guilds.contains(&t.guild_id) => {}
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    }
+    if !w.data.db.ticket_has_file(ticket_id, &hash).await.unwrap_or(false) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let (Some(store), Ok(Some((key, enc, mime)))) = (w.data.store.clone(), w.data.db.file(&hash).await) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let enc = crate::archive::Enc::parse(&enc);
+    let bytes = match store.get(&key).await.and_then(|b| crate::archive::decompress(b, enc)) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    };
+    let ctype = if enc == crate::archive::Enc::Webp { "image/webp".to_string() } else { mime };
+    let safe = ctype.starts_with("image/") || ctype.starts_with("video/") || ctype.starts_with("audio/") || ctype == "application/pdf";
+    let ctype = if safe || ctype.starts_with("text/plain") { ctype } else if ctype.starts_with("text/") { "text/plain; charset=utf-8".into() } else { "application/octet-stream".into() };
+    (
+        [
+            (header::CONTENT_TYPE, ctype),
+            (header::CACHE_CONTROL, "private, max-age=86400".into()),
+            (header::HeaderName::from_static("x-content-type-options"), "nosniff".into()),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn list_panels(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {

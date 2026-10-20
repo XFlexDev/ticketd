@@ -7,6 +7,7 @@ mod gc;
 mod logs;
 mod moderation;
 mod panels;
+mod roles;
 mod tickets;
 mod verify;
 mod web;

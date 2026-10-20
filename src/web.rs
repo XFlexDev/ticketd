@@ -230,6 +230,7 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/verify/{token}", get(verify_page).post(verify_submit))
         .route("/api/guilds/{guild_id}/modules/{name}", get(get_module).put(put_module))
         .route("/api/guilds/{guild_id}/cases", get(list_cases))
+        .route("/api/guilds/{guild_id}/rolemenus/{menu_id}/send", post(send_role_menu))
         .route("/share/{ticket_id}/{token}", get(share_page))
         .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
@@ -1110,6 +1111,7 @@ fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
         "automod" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::automod::AutomodConfig>(c).ok()).unwrap_or_default()).ok()?,
         "welcome" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::welcome::WelcomeConfig>(c).ok()).unwrap_or_default()).ok()?,
         "logging" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::logs::LogConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "roles" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::roles::RolesConfig>(c).ok()).unwrap_or_default()).ok()?,
         _ => return None,
     })
 }
@@ -1144,6 +1146,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         "logging" => serde_json::from_value::<crate::logs::LogConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "roles" => serde_json::from_value::<crate::roles::RolesConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let cfg = match checked {
@@ -1160,6 +1165,44 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         crate::logs::forget(guild_id);
     }
     Json(json!({"config": cfg})).into_response()
+}
+
+async fn send_role_menu(State(w): State<Web>, headers: HeaderMap, Path((guild_id, menu_id)): Path<(u64, String)>, Json(body): Json<Value>) -> Response {
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some(channel) = body["channel_id"].as_str().and_then(|c| c.parse::<u64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, "Pick a channel").into_response();
+    };
+    let channels = w.discord_list(&format!("guilds/{guild_id}/channels")).await;
+    if !channels.iter().any(|c| c["id"].as_str() == Some(&channel.to_string()) && matches!(c["type"].as_i64(), Some(0 | 5))) {
+        return (StatusCode::BAD_REQUEST, "That channel isn't in this server").into_response();
+    }
+    let cfg = crate::roles::config(&w.data, guild_id).await;
+    let Some(menu) = cfg.menus.iter().find(|m| m.id == menu_id) else {
+        return (StatusCode::NOT_FOUND, "Save the menu first").into_response();
+    };
+    if menu.roles.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Add at least one role").into_response();
+    }
+    let roles = w.discord_list(&format!("guilds/{guild_id}/roles")).await;
+    let names = |id: &str| roles.iter().find(|r| r["id"].as_str() == Some(id)).and_then(|r| r["name"].as_str()).unwrap_or("Role").to_string();
+    let msg = crate::roles::build_message(menu, &names);
+    match poise::serenity_prelude::ChannelId::new(channel).send_message(&*w.bot, msg).await {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => {
+            let raw = e.to_string();
+            let msg = if raw.contains("Missing") || raw.contains("permissions") {
+                "I can't post in that channel. Give my role View Channel, Send Messages and Embed Links there.".to_string()
+            } else if raw.contains("emoji") {
+                "One of the emojis isn't valid. Use a normal emoji or one from this server.".to_string()
+            } else {
+                format!("Couldn't post: {raw}")
+            };
+            (StatusCode::BAD_REQUEST, msg).into_response()
+        }
+    }
 }
 
 async fn list_cases(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>) -> Response {

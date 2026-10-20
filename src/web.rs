@@ -212,7 +212,13 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         base_url: std::env::var("DASHBOARD_BASE_URL").unwrap_or_else(|_| "http://localhost:8420".into()),
         bot_token: std::env::var("DISCORD_TOKEN")?,
         http: reqwest::Client::new(),
-        bot: std::sync::Arc::new(poise::serenity_prelude::Http::new(&std::env::var("DISCORD_TOKEN")?)),
+        bot: std::sync::Arc::new({
+            let h = poise::serenity_prelude::Http::new(&std::env::var("DISCORD_TOKEN")?);
+            if let Some(id) = std::env::var("DISCORD_CLIENT_ID").ok().and_then(|v| v.parse::<u64>().ok()) {
+                h.set_application_id(poise::serenity_prelude::ApplicationId::new(id));
+            }
+            h
+        }),
     };
 
     Ok(Router::new()
@@ -248,6 +254,7 @@ pub fn router(data: std::sync::Arc<Data>) -> Result<Router> {
         .route("/api/leaderboard/{guild_id}", get(public_leaderboard))
         .route("/api/guilds/{guild_id}/rolemenus/{menu_id}/send", post(send_role_menu))
         .route("/api/guilds/{guild_id}/alerts/test", post(test_alert))
+        .route("/api/guilds/{guild_id}/embed", post(send_embed))
         .route("/share/{ticket_id}/{token}", get(share_page))
         .route("/share/{ticket_id}/{token}/files/{hash}", get(share_file))
         .fallback_service(ServeDir::new("dashboard/dist").fallback(axum::routing::get(spa_index)))
@@ -1131,6 +1138,7 @@ fn module_json(name: &str, raw: Option<&str>) -> Option<Value> {
         "roles" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::roles::RolesConfig>(c).ok()).unwrap_or_default()).ok()?,
         "leveling" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::leveling::LevelConfig>(c).ok()).unwrap_or_default()).ok()?,
         "alerts" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::alerts::AlertsConfig>(c).ok()).unwrap_or_default()).ok()?,
+        "commands" => serde_json::to_value(raw.and_then(|c| serde_json::from_str::<crate::custom::CustomConfig>(c).ok()).unwrap_or_default()).ok()?,
         _ => return None,
     })
 }
@@ -1174,6 +1182,9 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
         "alerts" => serde_json::from_value::<crate::alerts::AlertsConfig>(body)
             .map_err(|e| e.to_string())
             .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
+        "commands" => serde_json::from_value::<crate::custom::CustomConfig>(body)
+            .map_err(|e| e.to_string())
+            .and_then(|mut c| c.validate().map(|_| serde_json::to_value(c).unwrap_or_default())),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let cfg = match checked {
@@ -1192,6 +1203,13 @@ async fn put_module(State(w): State<Web>, headers: HeaderMap, Path((guild_id, na
     if name == "leveling" {
         crate::leveling::forget(guild_id);
     }
+    if name == "commands" {
+        crate::custom::forget(guild_id);
+        let parsed: crate::custom::CustomConfig = serde_json::from_value(cfg.clone()).unwrap_or_default();
+        if let Err(e) = crate::custom::sync(&w.bot, guild_id, &parsed).await {
+            return (StatusCode::BAD_GATEWAY, format!("Saved, but the slash commands didn't update. {e}")).into_response();
+        }
+    }
     Json(json!({"config": cfg})).into_response()
 }
 
@@ -1206,6 +1224,69 @@ async fn test_alert(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Pa
     match crate::alerts::test(&feed).await {
         Ok((name, items)) => Json(json!({"name": name, "items": items})).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn send_embed(State(w): State<Web>, headers: HeaderMap, Path(guild_id): Path<u64>, Json(b): Json<Value>) -> Response {
+    use poise::serenity_prelude as serenity;
+    let session = w.session(&headers).await;
+    if let Err(s) = w.require_guild(&session, guild_id) {
+        return s.into_response();
+    }
+    let Some(channel) = b["channel_id"].as_str().and_then(|c| c.parse::<u64>().ok()) else {
+        return (StatusCode::BAD_REQUEST, "Pick a channel").into_response();
+    };
+    let channels = w.discord_list(&format!("guilds/{guild_id}/channels")).await;
+    if !channels.iter().any(|c| c["id"].as_str() == Some(&channel.to_string()) && matches!(c["type"].as_i64(), Some(0 | 5))) {
+        return (StatusCode::BAD_REQUEST, "That channel isn't in this server").into_response();
+    }
+    let s = |k: &str, max: usize| b[k].as_str().unwrap_or("").trim().chars().take(max).collect::<String>();
+    let link = |k: &str| Some(s(k, 2000)).filter(|u| u.starts_with("https://") || u.starts_with("http://"));
+    let (content, title, desc, footer, author) = (s("content", 2000), s("title", 256), s("description", 4096), s("footer", 2048), s("author", 256));
+    let mut e = serenity::CreateEmbed::new().color(crate::custom::parse_color(&s("color", 9)).unwrap_or(0x66BB6A));
+    let mut has = false;
+    if !title.is_empty() {
+        e = e.title(title);
+        has = true;
+    }
+    if !desc.is_empty() {
+        e = e.description(desc);
+        has = true;
+    }
+    if let Some(u) = link("url") {
+        e = e.url(u);
+    }
+    if let Some(u) = link("image") {
+        e = e.image(u);
+        has = true;
+    }
+    if let Some(u) = link("thumbnail") {
+        e = e.thumbnail(u);
+        has = true;
+    }
+    if !footer.is_empty() {
+        e = e.footer(serenity::CreateEmbedFooter::new(footer));
+    }
+    if !author.is_empty() {
+        e = e.author(serenity::CreateEmbedAuthor::new(author));
+    }
+    if !has && content.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Write something first").into_response();
+    }
+    let mut msg = serenity::CreateMessage::new();
+    if !content.is_empty() {
+        msg = msg.content(content);
+    }
+    if has {
+        msg = msg.embed(e);
+    }
+    match serenity::ChannelId::new(channel).send_message(&*w.bot, msg).await {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(err) => {
+            let raw = err.to_string();
+            let m = if raw.contains("Missing") || raw.contains("permissions") { "I can't post in that channel. Give my role View Channel, Send Messages and Embed Links there.".to_string() } else { raw };
+            (StatusCode::BAD_REQUEST, m).into_response()
+        }
     }
 }
 

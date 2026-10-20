@@ -3,6 +3,7 @@ mod alerts;
 mod archive;
 mod ai;
 mod automod;
+mod custom;
 mod db;
 mod gc;
 mod giveaways;
@@ -106,7 +107,7 @@ async fn main() -> Result<()> {
 fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise::Framework<Data, Error> {
     let dev_guild = cfg.dev_guild_id;
     let options = poise::FrameworkOptions {
-        commands: vec![
+        commands: custom::reserve(vec![
             tickets::ticket_open(),
             tickets::ticket_close(),
             tickets::ticket_add(),
@@ -137,18 +138,20 @@ fn build_framework(db: db::Kdb, cfg: Arc<Config>, ai: Arc<ai::Client>) -> poise:
             utility::poll(),
             utility::remind(),
             utility::reminders(),
-        ],
+        ]),
         on_error: |err| Box::pin(on_error(err)),
         event_handler: |fctx, event| {
             Box::pin(async move {
                 let ctx = fctx.serenity_context;
                 let data = fctx.user_data;
                 if let serenity::FullEvent::InteractionCreate { interaction, .. } = event {
+                    custom::on_command(ctx, data, interaction).await;
                     tickets::handle_component(ctx, interaction, data).await?;
                 }
                 if let serenity::FullEvent::Message { new_message, .. } = event {
                     if !automod::on_message(ctx, new_message, data).await {
                         leveling::on_message(ctx, new_message, data).await;
+                        custom::on_message(ctx, new_message, data).await;
                         tickets::on_message(ctx, new_message, data).await?;
                     }
                 }

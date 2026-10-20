@@ -341,6 +341,7 @@ pub async fn play(
         return reply(ctx, e, true).await;
     }
     let me = ctx.author().id.get();
+    ctx.defer().await?;
     let (meta, url) = if let Some(f) = file {
         let audio = f.content_type.as_deref().is_some_and(|t| t.starts_with("audio/") || t == "video/mp4" || t == "application/ogg")
             || [".mp3", ".ogg", ".opus", ".flac", ".wav", ".m4a", ".aac"].iter().any(|x| f.filename.to_lowercase().ends_with(x));
@@ -359,7 +360,6 @@ pub async fn play(
             let name = q.split(['?', '#']).next().unwrap_or(&q).rsplit('/').next().unwrap_or("Audio").to_string();
             (Meta { title: if name.is_empty() { "Audio".into() } else { name }, requester: me, ..Default::default() }, q)
         } else {
-            ctx.defer().await?;
             let r = match reqwest::Url::parse_with_params(&format!("{}/api/tracks", tunes_base()), &[("q", q.as_str()), ("limit", "5"), ("sort", "top")]) {
                 Ok(u) => API.get(u).send().await,
                 Err(_) => return reply(ctx, "Search is down right now.", false).await,

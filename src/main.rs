@@ -55,6 +55,8 @@ fn env(name: &str) -> Result<String> {
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt().init();
+    // ring and aws-lc-rs are both compiled in (songbird vs reqwest), so rustls can't pick one itself.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let token = env("DISCORD_TOKEN")?;
     let cfg = Arc::new(Config {

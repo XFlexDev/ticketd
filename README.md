@@ -27,3 +27,10 @@ cargo run --release
 ```
 
 Bot needs the `bot` + `applications.commands` scopes and Manage Channels + Send Messages permissions. Enable the Message Content intent in the dev portal.
+
+## Dashboard
+
+`cd dashboard && npm i && npm run build`, then set `DASHBOARD_ENABLED=1` in `.env`.
+Serves a Material-style web UI on `DASHBOARD_PORT`: Discord OAuth login, per-server
+settings editor, ticket list, transcript viewer. Set the OAuth2 redirect in the dev
+portal to `{DASHBOARD_BASE_URL}/api/auth/callback`.

@@ -1,16 +1,21 @@
 mod ai;
 mod db;
 mod tickets;
+mod web;
 
 use anyhow::Result;
 use poise::serenity_prelude as serenity;
 use std::sync::Arc;
 use tracing::info;
+use std::sync::Mutex;
 
+pub static WEB_TX: Mutex<Option<tokio::sync::oneshot::Sender<std::sync::Arc<Data>>>> = Mutex::new(None);
+
+#[derive(Clone)]
 pub struct Data {
     pub db: db::Kdb,
     pub cfg: Arc<Config>,
-    pub ai: ai::Client,
+    pub ai: Arc<ai::Client>,
 }
 
 pub type Error = anyhow::Error;
@@ -41,7 +46,7 @@ async fn main() -> Result<()> {
 
     let db = db::Kdb::from_env()?;
     db.init().await?;
-    let ai = ai::Client::from_env()?;
+    let ai = Arc::new(ai::Client::from_env()?);
 
     let options = poise::FrameworkOptions {
         commands: vec![
@@ -84,7 +89,11 @@ async fn main() -> Result<()> {
                         info!("registered commands globally");
                     }
                 }
-                Ok(Data { db, cfg, ai })
+                let data = Data { db, cfg, ai };
+                if let Some(tx) = WEB_TX.lock().unwrap().take() {
+                    let _ = tx.send(std::sync::Arc::new(data.clone()));
+                }
+                Ok(data)
             })
         })
         .build();
@@ -94,6 +103,26 @@ async fn main() -> Result<()> {
         | serenity::GatewayIntents::MESSAGE_CONTENT;
 
     let mut client = serenity::ClientBuilder::new(token, intents).framework(framework).await?;
+
+    // optional web dashboard/API
+    if std::env::var("DASHBOARD_ENABLED").map(|v| v == "1").unwrap_or(false) {
+        // share Data with the web server once framework setup finishes
+        // poise doesn't expose Data until setup, so grab it via a one-shot channel
+        let (tx, rx) = tokio::sync::oneshot::channel::<std::sync::Arc<Data>>();
+        WEB_TX.lock().unwrap().replace(tx);
+        tokio::spawn(async move {
+            if let Ok(data) = rx.await {
+                if let Ok(app) = web::router(data) {
+                    let port = std::env::var("DASHBOARD_PORT").unwrap_or_else(|_| "8420".into());
+                    if let Ok(listener) = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+                        info!("dashboard on :{port}");
+                        axum::serve(listener, app).await.ok();
+                    }
+                }
+            }
+        });
+    }
+
     client.start().await?;
     Ok(())
 }

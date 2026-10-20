@@ -80,6 +80,17 @@ impl Kdb {
         .await?;
         self.exec("CREATE INDEX IF NOT EXISTS idx_messages_ticket ON messages(ticket_id)", &[]).await?;
         self.exec(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                user_name TEXT NOT NULL,
+                guilds TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+            )",
+            &[],
+        )
+        .await?;
+        self.exec(
             "CREATE TABLE IF NOT EXISTS settings (
                 guild_id INTEGER PRIMARY KEY,
                 ticket_category_id INTEGER NOT NULL,
@@ -166,6 +177,48 @@ impl Kdb {
             ],
         )
         .await?;
+        Ok(())
+    }
+
+    pub async fn list_tickets(&self, guild_id: u64, limit: i64) -> Result<Vec<Ticket>> {
+        let rows = self
+            .rows(
+                "SELECT id, channel_id, user_id, subject, status FROM tickets WHERE guild_id = ? ORDER BY id DESC LIMIT ?",
+                &[json!(guild_id), json!(limit)],
+            )
+            .await?;
+        Ok(rows.iter().map(Self::ticket).collect())
+    }
+
+    pub async fn ticket_guild(&self, ticket_id: i64) -> Result<Option<i64>> {
+        let rows = self.rows("SELECT guild_id FROM tickets WHERE id = ?", &[json!(ticket_id)]).await?;
+        Ok(rows.first().and_then(|r| r[0].as_i64()))
+    }
+
+    pub async fn save_session(&self, token: &str, user_id: u64, user_name: &str, guilds: &str, expires_at: i64) -> Result<()> {
+        self.exec(
+            "INSERT OR REPLACE INTO sessions (token, user_id, user_name, guilds, expires_at) VALUES (?,?,?,?,?)",
+            &[json!(token), json!(user_id), json!(user_name), json!(guilds), json!(expires_at)],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// -> (user_id, user_name, guilds_json)
+    pub async fn session(&self, token: &str) -> Result<Option<(i64, String, String)>> {
+        let rows = self
+            .rows(
+                "SELECT user_id, user_name, guilds FROM sessions WHERE token = ? AND expires_at > ?",
+                &[json!(token), json!(now())],
+            )
+            .await?;
+        Ok(rows.first().map(|r| {
+            (r[0].as_i64().unwrap_or(0), r[1].as_str().unwrap_or("").into(), r[2].as_str().unwrap_or("[]").into())
+        }))
+    }
+
+    pub async fn delete_session(&self, token: &str) -> Result<()> {
+        self.exec("DELETE FROM sessions WHERE token = ?", &[json!(token)]).await?;
         Ok(())
     }
 

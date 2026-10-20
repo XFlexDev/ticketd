@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { mdiArrowLeft } from '@mdi/js'
 import { api } from '../api'
+import AdSlot from '../components/AdSlot.vue'
 const route = useRoute()
 const router = useRouter()
 const t = ref(null)
@@ -54,6 +55,7 @@ const rows = computed(() => {
         <p class="muted small mono id-line">#{{ route.params.id }}</p>
       </div>
     </div>
+    <AdSlot />
     <p v-if="error" class="muted">{{ error }}</p>
     <div v-else-if="!t" class="transcript"><div class="skeleton-row" style="border:0;height:40px"><span /></div></div>
     <template v-else>
@@ -71,6 +73,7 @@ const rows = computed(() => {
           </template>
         </div>
       </div>
+      <AdSlot />
     </template>
   </div>
 </template>

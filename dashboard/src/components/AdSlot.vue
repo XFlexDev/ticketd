@@ -1,18 +1,28 @@
 <script setup>
-import { computed } from 'vue'
-// Ad pages run sandboxed without allow-same-origin: they get kev.kreatix.dev as referrer but can't touch the dashboard or its session.
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useDisplay } from 'vuetify'
 
+// Ads live on ads.kreatix.dev (separate origin) so their scripts can't reach the dashboard or its session.
+// They load only after the page is done and idle, and the slot stays collapsed until an ad actually renders.
 const { width } = useDisplay()
-const units = {
-  wide: { key: '6626e80a85a19a6154791f608409a661', w: 728, h: 90 },
-  small: { key: '689d4a1423c6583fe1ec2a1aa14a2ee3', w: 320, h: 50 },
+const w = computed(() => (width.value >= 780 ? 728 : 320))
+const h = computed(() => (w.value === 728 ? 90 : 50))
+const ready = ref(false)
+const filled = ref(false)
+
+function onMsg(e) {
+  if (e.origin === 'https://ads.kreatix.dev' && e.data?.kevAd === 'filled') filled.value = true
 }
-const unit = computed(() => (width.value >= 780 ? units.wide : units.small))
+onMounted(() => {
+  window.addEventListener('message', onMsg)
+  const go = () => (window.requestIdleCallback || (f => setTimeout(f, 1200)))(() => (ready.value = true), { timeout: 3000 })
+  document.readyState === 'complete' ? go() : window.addEventListener('load', go, { once: true })
+})
+onUnmounted(() => window.removeEventListener('message', onMsg))
 </script>
 
 <template>
-  <div class="ad-slot" :style="{ height: unit.h + 'px' }">
-    <iframe :key="unit.key" :src="`/ad/${unit.w}.html`" :width="unit.w" :height="unit.h" title="Advertisement" loading="lazy" scrolling="no" referrerpolicy="no-referrer-when-downgrade" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" />
+  <div class="ad-slot" :class="{ filled }" :style="{ '--h': h + 'px' }">
+    <iframe v-if="ready" :key="w" :src="`https://ads.kreatix.dev/${w}.html`" :width="w" :height="h" title="Advertisement" scrolling="no" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox" />
   </div>
 </template>

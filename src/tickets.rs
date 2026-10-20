@@ -37,6 +37,38 @@ async fn guild_owner(ctx: &serenity::Context, guild: serenity::GuildId) -> Optio
     }
 }
 
+/// Returns the configured ticket category. If it's missing or not actually a category,
+/// reuses a "Tickets" category or creates one, and saves it.
+async fn ensure_category(ctx: &serenity::Context, data: &Data, guild: serenity::GuildId, s: &Settings) -> Result<serenity::ChannelId> {
+    let channels = guild.channels(&ctx.http).await?;
+    let is_cat = |id: serenity::ChannelId| channels.get(&id).is_some_and(|c| c.kind == serenity::ChannelType::Category);
+    if s.ticket_category_id != 0 && is_cat(serenity::ChannelId::new(s.ticket_category_id as u64)) {
+        return Ok(serenity::ChannelId::new(s.ticket_category_id as u64));
+    }
+    let id = match channels
+        .values()
+        .find(|c| c.kind == serenity::ChannelType::Category && c.name.eq_ignore_ascii_case("tickets"))
+    {
+        Some(c) => c.id,
+        None => {
+            guild
+                .create_channel(&ctx.http, serenity::CreateChannel::new("Tickets").kind(serenity::ChannelType::Category))
+                .await?
+                .id
+        }
+    };
+    data.db
+        .upsert_settings(&Settings {
+            guild_id: s.guild_id,
+            ticket_category_id: id.get() as i64,
+            mod_role_id: s.mod_role_id,
+            log_channel_id: s.log_channel_id,
+            ai_enabled: s.ai_enabled,
+        })
+        .await?;
+    Ok(id)
+}
+
 async fn create_ticket_channel(
     ctx: &serenity::Context,
     data: &Data,
@@ -45,9 +77,7 @@ async fn create_ticket_channel(
     user: &serenity::User,
     subject: &str,
 ) -> Result<(i64, serenity::ChannelId)> {
-    if s.ticket_category_id == 0 {
-        anyhow::bail!("No ticket category set. An admin must run `/setup` or pick one in the dashboard.");
-    }
+    let category = ensure_category(ctx, data, guild, s).await?;
     let everyone_deny = serenity::PermissionOverwrite {
         allow: serenity::Permissions::empty(),
         deny: serenity::Permissions::VIEW_CHANNEL,
@@ -98,7 +128,7 @@ async fn create_ticket_channel(
             &ctx.http,
             serenity::CreateChannel::new(name)
                 .kind(serenity::ChannelType::Text)
-                .category(serenity::ChannelId::new(s.ticket_category_id as u64))
+                .category(category)
                 .permissions([vec![everyone_deny, user_allow, bot_allow], staff_allow].concat())
                 .topic(format!("Ticket by {} ({})", user.name, subject)),
         )
@@ -151,19 +181,25 @@ async fn greet_ticket(
 #[poise::command(slash_command, guild_only, required_permissions = "MANAGE_GUILD", default_member_permissions = "MANAGE_GUILD")]
 pub async fn setup(
     ctx: Context<'_>,
-    #[description = "Category where ticket channels are created"] category: serenity::Channel,
+    #[description = "Category for ticket channels (default: creates \"Tickets\")"]
+    #[channel_types("Category")]
+    category: Option<serenity::GuildChannel>,
     #[description = "Extra staff role (owner and admins always have access)"] staff_role: Option<serenity::Role>,
-    #[description = "Channel for closed-ticket transcripts (optional)"] log_channel: Option<serenity::Channel>,
+    #[description = "Channel for closed-ticket transcripts (optional)"]
+    #[channel_types("Text")]
+    log_channel: Option<serenity::GuildChannel>,
     #[description = "AI auto-replies in tickets (default on)"] ai: Option<bool>,
 ) -> Result<(), Error> {
     let Some(guild) = ctx.guild_id() else { return Ok(()) };
-    let s = Settings {
+    ctx.defer_ephemeral().await?;
+    let mut s = Settings {
         guild_id: guild.get() as i64,
-        ticket_category_id: category.id().get() as i64,
+        ticket_category_id: category.map(|c| c.id.get() as i64).unwrap_or(0),
         mod_role_id: staff_role.as_ref().map(|r| r.id.get() as i64).unwrap_or(0),
-        log_channel_id: log_channel.map(|c| c.id().get() as i64),
+        log_channel_id: log_channel.map(|c| c.id.get() as i64),
         ai_enabled: ai.unwrap_or(true),
     };
+    s.ticket_category_id = ensure_category(ctx.serenity_context(), ctx.data(), guild, &s).await?.get() as i64;
     ctx.data().db.upsert_settings(&s).await?;
     private(ctx, format!(
         "Setup saved: tickets → <#{}>, staff → owner + admins{}, logs → {}",
